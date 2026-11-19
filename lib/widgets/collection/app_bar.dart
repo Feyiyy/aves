@@ -5,6 +5,7 @@ import 'package:aves/app_mode.dart';
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/filters/container/dynamic_album.dart';
 import 'package:aves/model/filters/container/set_and.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/trash.dart';
 import 'package:aves/model/query.dart';
 import 'package:aves/model/selection.dart';
@@ -36,6 +37,7 @@ import 'package:aves/widgets/common/basic/text/fading_line.dart';
 import 'package:aves/widgets/common/extensions/build_context.dart';
 import 'package:aves/widgets/common/identity/buttons/captioned_button.dart';
 import 'package:aves/widgets/common/tile_extent_controller.dart';
+import 'package:aves/widgets/dialogs/aves_confirmation_dialog.dart';
 import 'package:aves/widgets/dialogs/aves_dialog.dart';
 import 'package:aves/widgets/dialogs/change_layout_dialog.dart';
 import 'package:aves/widgets/search/collection_search_page_route.dart';
@@ -346,6 +348,8 @@ class _CollectionAppBarState extends State<CollectionAppBar> with RouteAware, Si
         titleText = l10n.collectionPickPageTitle;
       } else if (isTrash) {
         titleText = l10n.binPageTitle;
+      } else if (collection.filters.any((f) => f is HiddenAlbumFilter)) {
+        titleText = '已隐藏';
       } else {
         titleText = l10n.collectionPageTitle;
       }
@@ -485,6 +489,22 @@ class _CollectionAppBarState extends State<CollectionAppBar> with RouteAware, Si
     final l10n = context.l10n;
     final animations = context.select<Settings, AccessibilityAnimations>((v) => v.accessibilityAnimations);
     return [
+      if (collection.filters.any((f) => f is HiddenAlbumFilter))
+        IconButton(
+          icon: const Icon(AIcons.show),
+          tooltip: '恢复显示全部已隐藏相册',
+          onPressed: () async {
+            final confirmed = await showConfirmationDialog(
+              context: context,
+              message: '是否恢复显示所有已隐藏相册？',
+              ok: '恢复显示',
+            );
+            if (confirmed) {
+              settings.hiddenFilters = {};
+              Navigator.maybeOf(context)?.pop();
+            }
+          },
+        ),
       ...quickActionButtons,
       PopupMenuButton<EntrySetAction>(
         // key is expected by test driver

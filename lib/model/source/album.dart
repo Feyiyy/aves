@@ -1,6 +1,7 @@
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/filters/container/album_group.dart';
 import 'package:aves/model/filters/container/dynamic_album.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/settings/settings.dart';
 import 'package:aves/model/source/collection_source.dart';
@@ -138,6 +139,7 @@ mixin AlbumMixin on SourceBase {
       // clear entries for all dynamic albums and groups
       invalidateDynamicAlbumFilterSummary(notify: false);
       invalidateAlbumGroupFilterSummary(notify: false);
+      _filterSummary.remove(HiddenAlbumFilter.instance.key);
     }
     if (notify) {
       eventBus.fire(StoredAlbumSummaryInvalidatedEvent(directories));
@@ -248,7 +250,14 @@ mixin AlbumMixin on SourceBase {
     if (type == AlbumType.vault) return pContext.basename(dirPath);
 
     final dir = androidFileUtils.relativeDirectoryFromPath(dirPath);
-    if (dir == null) return dirPath;
+    if (dir == null) {
+      if (dirPath.startsWith('/云端相册/')) {
+        return '云端 · ${dirPath.substring('/云端相册/'.length)}';
+      } else if (dirPath == '/云端相册') {
+        return '云端相册';
+      }
+      return pContext.basename(dirPath);
+    }
 
     final relativeDir = dir.relativeDir;
     if (relativeDir.isEmpty) {

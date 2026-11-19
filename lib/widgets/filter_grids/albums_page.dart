@@ -4,6 +4,7 @@ import 'package:aves/model/dynamic_albums.dart';
 import 'package:aves/model/entry/extensions/props.dart';
 import 'package:aves/model/filters/container/album_group.dart';
 import 'package:aves/model/filters/container/dynamic_album.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/filters/filters.dart';
 import 'package:aves/model/grouping/common.dart';
@@ -144,6 +145,7 @@ class AlbumListPage extends StatelessWidget {
       ...albumGroupFilters,
       ...listedStoredAlbums,
       ...listedDynamicAlbums,
+      if (groupUri == null && settings.hiddenFilters.isNotEmpty) HiddenAlbumFilter.instance,
     };
 
     return FilterNavigationPage.sort(settings.albumSortFactor, settings.albumSortReverse, source, filters);

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:aves/model/covers.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/entry/extensions/catalog.dart';
 import 'package:aves/model/entry/extensions/keys.dart';
@@ -10,6 +11,7 @@ import 'package:aves/model/entry/sort.dart';
 import 'package:aves/model/favourites.dart';
 import 'package:aves/model/filters/container/album_group.dart';
 import 'package:aves/model/filters/container/tag_group.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/location.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/filters/filters.dart';
@@ -122,7 +124,7 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
   @override
   Set<AvesEntry> get allEntries => Set.unmodifiable(_entriesById.values);
 
-  Set<AvesEntry>? _visibleEntries, _trashedEntries;
+  Set<AvesEntry>? _visibleEntries, _trashedEntries, _hiddenEntries;
 
   @override
   Set<AvesEntry> get visibleEntries {
@@ -134,6 +136,17 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
   Set<AvesEntry> get trashedEntries {
     _trashedEntries ??= Set.unmodifiable(_applyTrashFilter(_entriesById.values));
     return _trashedEntries!;
+  }
+
+  Set<AvesEntry> get hiddenEntries {
+    _hiddenEntries ??= Set.unmodifiable(_applyOnlyHiddenFilters(_entriesById.values));
+    return _hiddenEntries!;
+  }
+
+  Iterable<AvesEntry> _applyOnlyHiddenFilters(Iterable<AvesEntry> entries) {
+    final appHiddenFilters = _getAppHiddenFilters();
+    if (appHiddenFilters.isEmpty) return const [];
+    return entries.where((entry) => !entry.trashed && appHiddenFilters.any((filter) => filter.test(entry)));
   }
 
   List<AvesEntry>? _sortedEntriesByDate;
@@ -182,6 +195,7 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
   void invalidateEntries() {
     _visibleEntries = null;
     _trashedEntries = null;
+    _hiddenEntries = null;
     _sortedEntriesByDate = null;
   }
 
@@ -245,6 +259,7 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
     _disposeEntries((id, _) => oldIds.contains(id));
     updateDerivedFilters(oldEntries);
     eventBus.fire(EntryRemovedEvent(oldEntries));
+    unawaited(cloudSyncService.onEntriesDeleted(oldEntries));
   }
 
   void clearEntries() {
@@ -582,7 +597,11 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
 
   @override
   FilterSummary computeFilterSummary(CollectionFilter filter) {
-    final entries = sortedEntriesByDate.where(filter.test).toList();
+    final entries = (filter is HiddenAlbumFilter
+            ? (hiddenEntries.toList()..sort(AvesEntrySort.compareByDate))
+            : sortedEntriesByDate)
+        .where(filter.test)
+        .toList();
     return FilterSummary(
       entryCount: entries.length,
       size: entries.map((v) => v.sizeBytes).sum,
@@ -641,7 +660,7 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
   AvesEntry? coverEntry(CollectionFilter filter) {
     final id = covers.of(filter)?.entryId;
     if (id != null) {
-      final entry = visibleEntries.firstWhereOrNull((entry) => entry.id == id);
+      final entry = (filter is HiddenAlbumFilter ? hiddenEntries : visibleEntries).firstWhereOrNull((entry) => entry.id == id);
       if (entry != null) return entry;
     }
     return recentEntry(filter);

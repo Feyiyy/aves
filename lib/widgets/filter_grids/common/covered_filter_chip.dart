@@ -5,6 +5,7 @@ import 'package:aves/model/covers.dart';
 import 'package:aves/model/filters/container/album_group.dart';
 import 'package:aves/model/filters/container/dynamic_album.dart';
 import 'package:aves/model/filters/container/tag_group.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/location.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/filters/covered/tag.dart';
@@ -122,6 +123,8 @@ class CoveredFilterChip<T extends CollectionFilter> extends StatelessWidget {
                   builder: (context, _) => _buildChip(context, source),
                 );
               }
+            case HiddenAlbumFilter _:
+              return _buildChip(context, source);
             default:
               return const SizedBox();
           }
@@ -207,6 +210,7 @@ class CoveredFilterChip<T extends CollectionFilter> extends StatelessWidget {
       mainAxisSize: .min,
       children: [
         if (pinned) _buildDetailIcon(context, AIcons.pin),
+        if (filter is HiddenAlbumFilter) _buildDetailIcon(context, AIcons.hide),
         if (filter is StoredAlbumFilter && androidFileUtils.isOnRemovableStorage(filter.album)) _buildDetailIcon(context, AIcons.storageCard),
         if (filter is StoredAlbumFilter && vaults.isVault(filter.album)) _buildDetailIcon(context, AIcons.locked),
         if (filter is DynamicAlbumFilter) _buildDetailIcon(context, AIcons.dynamicAlbum),

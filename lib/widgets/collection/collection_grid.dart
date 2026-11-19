@@ -18,6 +18,7 @@ import 'package:aves/theme/durations.dart';
 import 'package:aves/theme/icons.dart';
 import 'package:aves/utils/time_utils.dart';
 import 'package:aves/widgets/collection/app_bar.dart';
+import 'package:aves/widgets/collection/cloud_sync_progress_banner.dart';
 import 'package:aves/widgets/collection/draggable_thumb_label.dart';
 import 'package:aves/widgets/collection/grid/list_details_theme.dart';
 import 'package:aves/widgets/collection/grid/section_layout.dart';
@@ -593,6 +594,9 @@ class _CollectionScrollViewState extends State<_CollectionScrollView> with Widge
       scrollCacheExtent: ScrollCacheExtent.pixels(context.select<TileExtentController, double>((controller) => controller.effectiveExtentMax)),
       slivers: [
         appBar,
+        SliverToBoxAdapter(
+          child: CloudSyncProgressBanner(),
+        ),
         collection.isEmpty
             ? SliverFillRemaining(
                 hasScrollBody: false,

@@ -123,7 +123,7 @@ android {
         }
 
         getByName("profile") {
-            applicationIdSuffix = ".profile"
+            // applicationIdSuffix = ".profile" // AGP forbids library projects from setting applicationIdSuffix via Flutter's initWith
         }
 
         getByName("release") {

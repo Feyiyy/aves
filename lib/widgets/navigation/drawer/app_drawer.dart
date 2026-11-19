@@ -8,7 +8,9 @@ import 'package:aves/model/source/collection_source.dart';
 import 'package:aves/model/source/location/country.dart';
 import 'package:aves/model/source/location/place.dart';
 import 'package:aves/model/source/tag.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/services/common/services.dart';
+import 'package:aves/widgets/common/action_mixins/feedback.dart';
 import 'package:aves/theme/durations.dart';
 import 'package:aves/theme/icons.dart';
 import 'package:aves/theme/styles.dart';
@@ -74,7 +76,7 @@ class const AppDrawer({
   }
 }
 
-class _AppDrawerState extends State<AppDrawer> with WidgetsBindingObserver {
+class _AppDrawerState extends State<AppDrawer> with WidgetsBindingObserver, FeedbackMixin {
   // using the default controller conflicts
   // with bottom nav bar primary scroll monitoring
   final ScrollController _scrollController = ScrollController();
@@ -227,6 +229,24 @@ class _AppDrawerState extends State<AppDrawer> with WidgetsBindingObserver {
               Wrap(
                 spacing: 8,
                 children: [
+                  OutlinedButton.icon(
+                    key: const Key('drawer-cloud-button'),
+                    onPressed: () async {
+                      Navigator.maybeOf(context)?.pop();
+                      final source = context.read<CollectionSource>();
+                      final ok = await cloudSyncService.mountGoogleDriveSaf(source);
+                      if (context.mounted) {
+                        showFeedback(
+                          context,
+                          FeedbackType.info,
+                          ok ? 'Google 云端硬盘相册挂载成功' : '未选择或挂载失败',
+                        );
+                      }
+                    },
+                    style: drawerButtonStyle,
+                    icon: const Icon(Icons.cloud_outlined),
+                    label: const Text('挂载云端硬盘'),
+                  ),
                   OutlinedButton.icon(
                     // key is expected by test driver
                     key: const Key('drawer-about-button'),

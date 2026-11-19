@@ -6,6 +6,7 @@ import 'package:aves/model/entry/extensions/images.dart';
 import 'package:aves/model/entry/extensions/props.dart';
 import 'package:aves/model/settings/enums/entry_background.dart';
 import 'package:aves/model/settings/settings.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/services/common/services.dart';
 import 'package:aves/widgets/common/basic/insets.dart';
 import 'package:aves/widgets/common/fx/checkered_decoration.dart';
@@ -48,6 +49,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
   ImageInfo? _lastImageInfo;
   Object? _lastException;
   late final ImageStreamListener _streamListener;
+  ValueNotifier<int>? _cloudRevisionNotifier;
 
   AvesEntry get entry => widget.entry;
 
@@ -82,11 +84,23 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     if (!visualChangeNotifier.isDisposed) {
       visualChangeNotifier.addListener(_onVisualChanged);
     }
+
+    if (widget.entry.uri.startsWith('cloudgallery://')) {
+      final uri = Uri.tryParse(widget.entry.uri);
+      final sha256 = (uri?.host ?? '').toLowerCase();
+      if (sha256.length == 64) {
+        _cloudRevisionNotifier = cloudSyncService.revisionNotifierFor(sha256);
+        _cloudRevisionNotifier?.addListener(_onVisualChanged);
+      }
+    }
+
     _initProvider();
   }
 
   void _unregisterWidget(ThumbnailImage widget) {
     widget.entry.visualChangeNotifier.removeListener(_onVisualChanged);
+    _cloudRevisionNotifier?.removeListener(_onVisualChanged);
+    _cloudRevisionNotifier = null;
     _pauseProvider();
     _currentProviderStream?.stopListening();
     _currentProviderStream = null;
@@ -315,12 +329,15 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     return child;
   }
 
-  // when the entry image itself changed (e.g. after rotation)
+  // when the entry image itself changed (e.g. after rotation or cloud thumbnail ready)
   void _onVisualChanged() async {
     // rebuild to refresh the thumbnails
+    _lastException = null;
     _pauseProvider();
+    _currentProviderStream?.stopListening();
+    _currentProviderStream = null;
     _initProvider();
-    setState(() {});
+    if (mounted) setState(() {});
   }
 }
 

@@ -179,6 +179,7 @@ open class MainActivity : FlutterFragmentActivity() {
         // - need Activity
         MethodChannel(messenger, AppProfileHandler.CHANNEL).setMethodCallHandler(AppProfileHandler(this))
         MethodChannel(messenger, WindowHandler.CHANNEL).setMethodCallHandler(ActivityWindowHandler(this))
+        deckers.thibault.aves.channel.calls.CloudSafHandler(this).register(messenger)
 
         // result streaming: dart -> platform ->->-> dart
         // - need Context

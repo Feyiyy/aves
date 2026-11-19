@@ -9,6 +9,7 @@ import 'package:aves/model/entry/extensions/multipage.dart';
 import 'package:aves/model/entry/extensions/props.dart';
 import 'package:aves/model/entry/sort.dart';
 import 'package:aves/model/favourites.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/location.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/filters/favourite.dart';
@@ -57,7 +58,7 @@ class CollectionLens with ChangeNotifier {
 
   Map<SectionKey, List<AvesEntry>> sections = Map.unmodifiable({});
 
-  Set<CollectionFilter> get visibleFilters => filters.where((v) => !(v is QueryFilter && v.live) && v is! TrashFilter).toSet();
+  Set<CollectionFilter> get visibleFilters => filters.where((v) => !(v is QueryFilter && v.live) && v is! TrashFilter && v is! HiddenAlbumFilter).toSet();
 
   new({
     required this.source,
@@ -191,7 +192,7 @@ class CollectionLens with ChangeNotifier {
   }
 
   void _applyFilters() {
-    final entries = fixedSelection ?? (filters.contains(TrashFilter.instance) ? source.trashedEntries : source.visibleEntries);
+    final entries = fixedSelection ?? (filters.contains(TrashFilter.instance) ? source.trashedEntries : (filters.any((f) => f is HiddenAlbumFilter) ? source.hiddenEntries : source.visibleEntries));
     _disposeSyntheticEntries();
     _filteredSortedEntries = List.of(filters.isEmpty ? entries : entries.where((entry) => filters.every((filter) => filter.test(entry))));
 

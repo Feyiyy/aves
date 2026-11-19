@@ -11,6 +11,7 @@ import 'package:aves/model/settings/settings.dart';
 import 'package:aves/model/source/analysis_controller.dart';
 import 'package:aves/model/source/collection_source.dart';
 import 'package:aves/model/vaults/vaults.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/services/common/services.dart';
 import 'package:aves/theme/durations.dart';
 import 'package:aves/utils/android_file_utils.dart';
@@ -54,6 +55,7 @@ class MediaStoreSource extends CollectionSource {
         loadTopEntriesFirst: loadTopEntriesFirst,
       ),
     );
+    unawaited(cloudSyncService.sync(this));
   }
 
   Future<void> _loadEssentials() async {
@@ -137,6 +139,7 @@ class MediaStoreSource extends CollectionSource {
     notifyAlbumsChanged();
 
     await _loadVaultEntries(scopeDirectory);
+    await _loadCloudEntries(scopeDirectory);
 
     debugPrint('$runtimeType load ${stopwatch.elapsed} load metadata');
     if (scopeDirectory != null) {
@@ -426,10 +429,20 @@ class MediaStoreSource extends CollectionSource {
       _changedUris.addAll(await mediaStoreService.getChangedUris(sinceGeneration));
       onStoreChanged(null);
     }
+    unawaited(cloudSyncService.sync(this));
   }
 
   Future<void> updateGeneration() async {
     _lastGenerationByVolume = await mediaStoreService.getGenerationByVolume();
+  }
+
+  // cloud
+
+  Future<void> _loadCloudEntries(String? directory) async {
+    final entries = await localMediaDb.loadEntries(origin: EntryOrigins.cloud, directory: directory);
+    if (entries.isNotEmpty) {
+      addEntries(entries, notify: false);
+    }
   }
 
   // vault

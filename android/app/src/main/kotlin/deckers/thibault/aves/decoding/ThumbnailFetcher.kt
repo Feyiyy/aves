@@ -63,6 +63,11 @@ class ThumbnailFetcher internal constructor(
     }
 
     suspend fun fetch() {
+        if (uri.scheme.equals("cloudgallery", ignoreCase = true)) {
+            fetchCloudGalleryThumbnail()
+            return
+        }
+
         var bitmap: Bitmap? = null
         var exception: Exception? = null
 
@@ -72,10 +77,12 @@ class ThumbnailFetcher internal constructor(
                 // As of Android 11, the Media Store content resolver may return a thumbnail
                 // that is automatically rotated according to EXIF orientation, but not flipped,
                 // so we skip this step for flipped entries.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    bitmap = getByResolver()
-                } else if (MediaStoreUriHelper.isMediaStoreContentUri(uri)) {
-                    bitmap = getByMediaStore()
+                if (uri.scheme != "http" && uri.scheme != "https") {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        bitmap = getByResolver()
+                    } else if (MediaStoreUriHelper.isMediaStoreContentUri(uri)) {
+                        bitmap = getByMediaStore()
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -168,10 +175,21 @@ class ThumbnailFetcher internal constructor(
             options = options.diskCacheStrategy(DiskCacheStrategy.RESOURCE)
         }
 
+        val model: Any = if (uri.scheme == "http" || uri.scheme == "https") {
+            val thumbParam = uri.getQueryParameter("thumb")
+            if (thumbParam != null) {
+                "${uri.scheme}://${uri.authority}/api/thumbs/$thumbParam"
+            } else {
+                uri.toString()
+            }
+        } else {
+            AvesAppGlideModule.getModel(context, contentAddress, videoMethods = videoMethods)
+        }
+
         val target = Glide.with(context)
             .asBitmap()
             .apply(options)
-            .load(AvesAppGlideModule.getModel(context, contentAddress, videoMethods = videoMethods))
+            .load(model)
             .submit(width, height)
 
         return try {
@@ -183,6 +201,57 @@ class ThumbnailFetcher internal constructor(
         } finally {
             Glide.with(context).clear(target)
         }
+    }
+
+    private suspend fun fetchCloudGalleryThumbnail() {
+        val sha256 = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase()
+        if (sha256.isNullOrEmpty() || sha256.length !in 16..64) {
+            result.error("getThumbnail-cloud", "Invalid cloudgallery URI: $uri", null)
+            return
+        }
+
+        val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase()
+        val thumbKey = if (!thumbParam.isNullOrEmpty() && thumbParam.length in 16..64) thumbParam else sha256
+
+        var localFile: java.io.File? = deckers.thibault.aves.cloud.GoogleDriveSafManager.getLocalThumbIfPresent(context, thumbKey)
+        if (localFile == null && thumbKey != sha256) {
+            localFile = deckers.thibault.aves.cloud.GoogleDriveSafManager.getLocalThumbIfPresent(context, sha256)
+        }
+
+        if (localFile == null) {
+            val treeUri = deckers.thibault.aves.cloud.CloudGalleryHolder.getPersistedTreeUri(context)
+            localFile = deckers.thibault.aves.cloud.GoogleDriveSafManager.fetchForegroundThumbnail(context, treeUri, thumbKey)
+        }
+
+        if (localFile != null && localFile.exists() && localFile.length() > 0L) {
+            try {
+                if (!decoded) {
+                    val fileLen = localFile.length()
+                    if (fileLen in 1L..(10L * 1024 * 1024)) {
+                        val bytesWithTrailer = ByteArray(fileLen.toInt() + 1)
+                        java.io.FileInputStream(localFile).use { it.read(bytesWithTrailer, 0, fileLen.toInt()) }
+                        bytesWithTrailer[fileLen.toInt()] = BitmapUtils.FORMAT_BYTE_ENCODED_AS_BYTES[0]
+                        deckers.thibault.aves.cloud.AppLogger.log(context, "[ThumbFetch] Success streamBytes: sha=$sha256 key=$thumbKey bytes=${bytesWithTrailer.size}")
+                        result.streamBytes(ByteArrayInputStream(bytesWithTrailer))
+                        return
+                    }
+                } else {
+                    val bitmap = android.graphics.BitmapFactory.decodeFile(localFile.absolutePath)
+                    if (bitmap != null) {
+                        val bytes = BitmapUtils.getBytes(bitmap, recycle = false, decoded = true, applyGainmap = false, mimeType = "image/webp")
+                        if (bytes != null) {
+                            deckers.thibault.aves.cloud.AppLogger.log(context, "[ThumbFetch] Success decoded bitmap: sha=$sha256 key=$thumbKey")
+                            result.streamBytes(ByteArrayInputStream(bytes))
+                            return
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(LOG_TAG, "Failed to read local cloud thumb $sha256", e)
+            }
+        }
+
+        result.error("getThumbnail-cloud-waiting", "Cloud thumbnail pending: $sha256", null)
     }
 
     companion object {

@@ -36,6 +36,13 @@ import java.io.OutputStream
 import java.util.Locale
 import java.util.regex.Pattern
 import kotlin.io.encoding.Base64
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import deckers.thibault.aves.cloud.AppLogger
+import deckers.thibault.aves.cloud.CloudGalleryHolder
+import deckers.thibault.aves.cloud.GoogleDriveSafManager
 
 object StorageUtils {
     private val LOG_TAG = LogUtils.createTag<StorageUtils>()
@@ -578,6 +585,51 @@ object StorageUtils {
         val mimeType = contentAddress.mimeType
         val uri = contentAddress.uri
 
+        if (uri.scheme == "cloudgallery") {
+            val sha256 = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase() ?: ""
+            val relPath = uri.getQueryParameter("rel")
+            val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase()
+            val thumbHash = if (!thumbParam.isNullOrEmpty() && thumbParam.length in 16..64) thumbParam else sha256
+
+            // 1. 本地已有原图缓存，直接返回本地文件 URI
+            val localOriginal = if (sha256.length in 16..64) {
+                GoogleDriveSafManager.getLocalOriginalIfPresent(context, sha256)
+            } else null
+            if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
+                AppLogger.log(context, "[Glide] Hit Local Original: $sha256 (${localOriginal.length()} bytes)")
+                return Uri.fromFile(localOriginal)
+            }
+
+            // 2. 本地有缩略图，Glide 可先渲染缩略图作为底图，同时触发后台拉取真实原图
+            val localThumb = if (thumbHash.length in 16..64) {
+                GoogleDriveSafManager.getLocalThumbIfPresent(context, thumbHash)
+            } else null
+            if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
+                if (sha256.length in 16..64 && !relPath.isNullOrEmpty()) {
+                    val treeUri = CloudGalleryHolder.getPersistedTreeUri(context)
+                    if (treeUri != null) {
+                        CoroutineScope(Dispatchers.IO).launch {
+                            GoogleDriveSafManager.fetchOriginalToCache(
+                                context,
+                                treeUri,
+                                relPath,
+                                sha256
+                            )
+                        }
+                    }
+                }
+                AppLogger.log(context, "[Glide] Hit Local Thumb: thumb=$thumbHash, bg fetch original")
+                return Uri.fromFile(localThumb)
+            }
+
+            // 3. 原图和缩略图均未落盘，通过 openInputStream 创建临时文件（可触发 Stage 2 拉取）
+            return try {
+                Uri.fromFile(createTempFile(context, uri, sizeBytes))
+            } catch (_: Exception) {
+                uri
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && MediaStoreUriHelper.isMediaStoreContentUri(uri)) {
             val uriPath = uri.path
             when {
@@ -619,13 +671,77 @@ object StorageUtils {
     fun openInputStream(context: Context, uri: Uri): InputStream? {
         val safeUri = getSafeInputUri(context, uri)
         return try {
-            return if (uri.isFileScheme) {
+            return if (uri.scheme == "cloudgallery") {
+                val sha256 = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase() ?: ""
+                val relPath = uri.getQueryParameter("rel")
+                val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase()
+                val thumbHash = if (!thumbParam.isNullOrEmpty() && thumbParam.length in 16..64) thumbParam else sha256
+
+                AppLogger.log(context, "[Stream] Request: sha=$sha256 thumb=$thumbHash rel=$relPath")
+
+                // Stage 1: 优先检查本地是否已有高清原图缓存
+                val localOriginal = if (sha256.length in 16..64) {
+                    GoogleDriveSafManager.getLocalOriginalIfPresent(context, sha256)
+                } else null
+
+                if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
+                    AppLogger.log(context, "[Stream] Stage 1 Hit High-Res Original: sha=$sha256 size=${localOriginal.length()}")
+                    return localOriginal.inputStream()
+                }
+
+                // Stage 2: 异步触发后台拉取真实高清原图
+                if (sha256.length in 16..64 && !relPath.isNullOrEmpty()) {
+                    val treeUri = CloudGalleryHolder.getPersistedTreeUri(context)
+                    if (treeUri != null) {
+                        AppLogger.log(context, "[Stream] Stage 2 Trigger BG Download Original: rel=$relPath")
+                        CoroutineScope(Dispatchers.IO).launch {
+                            GoogleDriveSafManager.fetchOriginalToCache(
+                                context,
+                                treeUri,
+                                relPath,
+                                sha256
+                            )
+                        }
+                    }
+                }
+
+                // Stage 3: 降级返回本地 256px WebP 缩略图（0ms 呈现底图消除黑屏）
+                val localThumb = if (thumbHash.length in 16..64) {
+                    GoogleDriveSafManager.getLocalThumbIfPresent(context, thumbHash)
+                } else null
+
+                if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
+                    AppLogger.log(context, "[Stream] Stage 3 Hit Local Thumb: thumb=$thumbHash")
+                    return localThumb.inputStream()
+                }
+
+                // Stage 4: 终极降级（若本地缩略图也未在磁盘，尝试点对点快速拉取缩略图）
+                if (thumbHash.length in 16..64) {
+                    val treeUri = CloudGalleryHolder.getPersistedTreeUri(context)
+                    val fetchedThumb = runBlocking {
+                        GoogleDriveSafManager.fetchForegroundThumbnail(context, treeUri, thumbHash)
+                    }
+                    if (fetchedThumb != null && fetchedThumb.exists()) {
+                        AppLogger.log(context, "[Stream] Stage 4 Fetched Thumb: thumb=$thumbHash")
+                        return fetchedThumb.inputStream()
+                    }
+                }
+
+                AppLogger.log(context, "[Stream] Fallback null: sha=$sha256")
+                null
+            } else if (uri.isFileScheme) {
                 FileInputStream(uri.path)
             } else if (uri.isDataScheme) {
                 val uriString = uri.toString()
                 val index = uriString.indexOf(DATA_URI_BASE64_SEPARATOR)
                 if (index == -1) throw Exception("unsupported data URI encoding for uri=$uri")
                 Base64.decode(uriString, index + DATA_URI_BASE64_SEPARATOR.length).inputStream()
+            } else if (uri.scheme == "http" || uri.scheme == "https") {
+                val connection = java.net.URL(uri.toString()).openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 10000
+                connection.readTimeout = 30000
+                connection.instanceFollowRedirects = true
+                connection.inputStream
             } else {
                 context.contentResolver.openInputStream(safeUri)
             }

@@ -1,6 +1,7 @@
 import 'package:aves/model/dynamic_albums.dart';
 import 'package:aves/model/filters/container/dynamic_album.dart';
 import 'package:aves/model/filters/container/group_base.dart';
+import 'package:aves/model/filters/covered/hidden_album.dart';
 import 'package:aves/model/filters/covered/stored_album.dart';
 import 'package:aves/model/filters/covered/tag.dart';
 import 'package:aves/model/filters/filters.dart';
@@ -47,6 +48,8 @@ mixin GroupingConversion {
         return _buildDynamicAlbumUri(filter.name);
       case TagFilter _:
         return _buildTagUri(filter.tag);
+      case HiddenAlbumFilter _:
+        return null;
       default:
         throw Exception('unknown type with filter=$filter');
     }
