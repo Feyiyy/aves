@@ -485,22 +485,6 @@ class CloudSyncService {
         _entryBySha256[thumbHash.toLowerCase()] = entry;
       }
     }
-        rotationDegrees: 0,
-        sizeBytes: fileSize,
-        sourceTitle: fileName,
-        dateAddedSecs: takenAtMs ~/ 1000,
-        dateModifiedMillis: modifiedAtMs,
-        sourceDateTakenMillis: takenAtMs,
-        durationMillis: durationMs > 0 ? durationMs : null,
-        trashed: false,
-        origin: EntryOrigins.cloud,
-      );
-      cloudEntries.add(entry);
-      _entryBySha256[sha256.toLowerCase()] = entry;
-      if (thumbHash.isNotEmpty && thumbHash != sha256) {
-        _entryBySha256[thumbHash.toLowerCase()] = entry;
-      }
-    }
 
     if (cloudEntries.isNotEmpty) {
       await localMediaDb.insertEntries(cloudEntries);
