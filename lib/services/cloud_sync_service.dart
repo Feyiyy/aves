@@ -268,47 +268,41 @@ class CloudSyncService {
     }
   }
 
-  /// 自动同步：若已挂载 SAF 则同步 SAF 快照；否则尝试局域网小电脑同步
+  /// 结合 sha256 与 relPath 计算稳定 53-bit 负数 ID，彻底消除重复内容覆盖与 JS 溢出
+  int _stableCloudEntryId(String sha256, String relPath) {
+    int hash = 0xcbf29ce484222325;
+    for (final codeUnit in '$sha256|$relPath'.codeUnits) {
+      hash ^= codeUnit;
+      hash = (hash * 0x100000001b3) & 0x1FFFFFFFFFFFFF; // 53-bit safe int
+    }
+    return hash == 0 ? -1 : -hash;
+  }
+
+  /// 自动同步：优先 800ms 探测局域网 PC Daemon，不可达再自动降级 Google Drive SAF
   Future<void> sync(CollectionSource source) async {
     if (_isSyncing) return;
     _isSyncing = true;
     ensureInitialized();
     try {
-      // 1. 优先检查是否已持久化挂载 Google Drive SAF
-      final treeUri = await getPersistedTreeUri();
-      if (treeUri != null && treeUri.isNotEmpty) {
-        debugPrint('CloudSyncService: found persisted Google Drive SAF treeUri: $treeUri');
-        try {
-          final res = await _safChannel.invokeMapMethod<String, dynamic>('syncSnapshot');
-          final path = res?['snapshotPath'] as String?;
-          if (path != null && File(path).existsSync()) {
-            await _loadSnapshotDatabase(File(path), source, isSaf: true);
-            unawaited(startThumbPackUnpack(treeUri: treeUri));
-            unawaited(flushPendingOutbox());
-            unawaited(performAutoBackup(source));
-            return;
-          }
-        } catch (e) {
-          debugPrint('CloudSyncService: SAF syncSnapshot error: $e');
-        }
-        unawaited(startThumbPackUnpack(treeUri: treeUri));
-        unawaited(flushPendingOutbox());
-        unawaited(performAutoBackup(source));
-        return;
+      final lanOk = await _trySyncViaLanHttp(source);
+      if (!lanOk) {
+        await _trySyncViaGoogleDriveSaf(source);
       }
+      unawaited(flushPendingOutbox());
+      unawaited(performAutoBackup(source));
+    } catch (e, stack) {
+      debugPrint('CloudSyncService: sync failed: $e\n$stack');
+    } finally {
+      _isSyncing = false;
+    }
+  }
 
-      // 2. 回退到小电脑 HTTP 局域网通道 (192.168.5.3:8088)
-      final baseUrl = serverUrl;
+  Future<bool> _trySyncViaLanHttp(CollectionSource source) async {
+    final baseUrl = serverUrl;
+    try {
       final pingUri = Uri.parse('$baseUrl/api/version');
-      http.Response resp;
-      try {
-        resp = await http.get(pingUri).timeout(const Duration(seconds: 2));
-      } catch (e) {
-        debugPrint('CloudSyncService: HTTP ping $baseUrl skipped or unreachable: $e');
-        return;
-      }
-
-      if (resp.statusCode != 200) return;
+      final resp = await http.get(pingUri).timeout(const Duration(milliseconds: 800));
+      if (resp.statusCode != 200) return false;
 
       final manifest = jsonDecode(resp.body) as Map<String, dynamic>;
       final remoteSnapshotVersion = (manifest['snapshot_version'] as num?)?.toInt() ?? 0;
@@ -316,15 +310,14 @@ class CloudSyncService {
 
       final currentCached = await localMediaDb.loadEntries(origin: EntryOrigins.cloud);
       if (remoteSnapshotVersion == localSnapshotVersion && currentCached.isNotEmpty) {
-        unawaited(flushPendingOutbox());
-        unawaited(performAutoBackup(source));
-        return;
+        debugPrint('CloudSyncService: LAN snapshot v$localSnapshotVersion already up-to-date');
+        return true;
       }
 
-      debugPrint('CloudSyncService: downloading HTTP snapshot (remote v$remoteSnapshotVersion)...');
+      debugPrint('CloudSyncService: downloading LAN HTTP snapshot (remote v$remoteSnapshotVersion)...');
       final dbUri = Uri.parse('$baseUrl/api/database');
       final dbResp = await http.get(dbUri).timeout(const Duration(seconds: 30));
-      if (dbResp.statusCode != 200) return;
+      if (dbResp.statusCode != 200) return false;
 
       final dbDir = await getDatabasesPath();
       final tempDbFile = File(p.join(dbDir, 'master_index_snapshot_http.db'));
@@ -336,13 +329,31 @@ class CloudSyncService {
       } catch (_) {}
 
       await settings.store.setInt('cloud_snapshot_version', remoteSnapshotVersion);
-      unawaited(flushPendingOutbox());
-      unawaited(performAutoBackup(source));
-    } catch (e, stack) {
-      debugPrint('CloudSyncService: sync failed: $e\n$stack');
-    } finally {
-      _isSyncing = false;
+      return true;
+    } catch (e) {
+      debugPrint('CloudSyncService: LAN HTTP sync probe skipped/unreachable: $e');
+      return false;
     }
+  }
+
+  Future<bool> _trySyncViaGoogleDriveSaf(CollectionSource source) async {
+    final treeUri = await getPersistedTreeUri();
+    if (treeUri == null || treeUri.isEmpty) return false;
+
+    debugPrint('CloudSyncService: attempting Google Drive SAF fallback sync: $treeUri');
+    try {
+      final res = await _safChannel.invokeMapMethod<String, dynamic>('syncSnapshot');
+      final path = res?['snapshotPath'] as String?;
+      if (path != null && File(path).existsSync()) {
+        await _loadSnapshotDatabase(File(path), source, isSaf: true);
+        unawaited(startThumbPackUnpack(treeUri: treeUri));
+        return true;
+      }
+    } catch (e) {
+      debugPrint('CloudSyncService: SAF syncSnapshot error: $e');
+    }
+    unawaited(startThumbPackUnpack(treeUri: treeUri));
+    return false;
   }
 
   Future<void> _loadSnapshotDatabase(
@@ -362,7 +373,7 @@ class CloudSyncService {
 
     debugPrint('CloudSyncService: parsed ${rows.length} active rows, ${deletedRows.length} deleted rows from snapshot (isSaf=$isSaf)');
 
-    // 1. 先彻底清理已被标记删除的图片
+    // 1. 先彻底清理已被标记删除的图片 (包括 SAF 虚拟 URI 与 LAN HTTP URI)
     _isPurgingDeletedEntries = true;
     try {
       final deletedIdSet = deletedRows
@@ -371,11 +382,15 @@ class CloudSyncService {
           .toSet();
       if (deletedIdSet.isNotEmpty) {
         final toRemoveUris = source.allEntries
-            .where((e) => e.uri.startsWith('cloudgallery://'))
+            .where((e) => e.origin == EntryOrigins.cloud)
             .where((e) {
               final uri = Uri.tryParse(e.uri);
-              final host = (uri?.host ?? '').toLowerCase().trim();
-              return deletedIdSet.contains(host);
+              if (uri == null) return false;
+              final host = uri.host.toLowerCase().trim();
+              if (deletedIdSet.contains(host)) return true;
+              final thumb = uri.queryParameters['thumb']?.replaceAll('.webp', '').toLowerCase().trim();
+              if (thumb != null && deletedIdSet.contains(thumb)) return true;
+              return false;
             })
             .map((e) => e.uri)
             .toSet();
@@ -388,10 +403,11 @@ class CloudSyncService {
       _isPurgingDeletedEntries = false;
     }
 
-    final existingUris = source.allEntries
-        .where((e) => e.uri.startsWith('cloudgallery://'))
-        .map((e) => e.uri)
-        .toSet();
+    // 构建 O(1) 现有条目映射，彻底消除 O(N^2) 循环内 firstWhere 查重
+    final existingByUri = <String, AvesEntry>{
+      for (final e in source.allEntries)
+        if (e.origin == EntryOrigins.cloud) e.uri: e,
+    };
 
     final cloudEntries = <AvesEntry>{};
     for (final row in rows) {
@@ -411,10 +427,8 @@ class CloudSyncService {
       final thumbName = thumbRelPath.isNotEmpty ? thumbRelPath.split('/').last : '$sha256.webp';
       final thumbHash = thumbName.replaceAll('.webp', '');
 
-      // 56-bit safe stable negative integer ID
-      final hexPart = sha256.length >= 14 ? sha256.substring(0, 14) : sha256.padRight(14, '0');
-      final hashInt = int.parse(hexPart, radix: 16);
-      final entryId = -hashInt;
+      // 53-bit 稳定负数防碰撞 ID
+      final entryId = _stableCloudEntryId(sha256, relPath);
 
       final encodedPath = Uri.encodeComponent(relPath);
 
@@ -432,14 +446,19 @@ class CloudSyncService {
         displayPath = '/局域网云端相册/$relPath';
       }
 
-      if (existingUris.contains(uri)) {
-        final existingEntry = source.allEntries.firstWhere((e) => e.uri == uri);
+      final existingEntry = existingByUri[uri];
+      if (existingEntry != null) {
         _entryBySha256[sha256.toLowerCase()] = existingEntry;
         if (thumbHash.isNotEmpty && thumbHash != sha256) {
           _entryBySha256[thumbHash.toLowerCase()] = existingEntry;
         }
         continue;
       }
+
+      // 关键修复：若为视频且宽高为 0，赋予保底尺寸 1920x1080，解除 Aves 播放器 isEmpty 拦截
+      final isVideo = mimeType.startsWith('video/');
+      final effectiveWidth = (width > 0) ? width : (isVideo ? 1920 : 0);
+      final effectiveHeight = (height > 0) ? height : (isVideo ? 1080 : 0);
 
       final entry = AvesEntry(
         id: entryId,
@@ -448,8 +467,24 @@ class CloudSyncService {
         contentId: null,
         pageId: null,
         mimeType: mimeType,
-        width: width,
-        height: height,
+        width: effectiveWidth,
+        height: effectiveHeight,
+        rotationDegrees: 0,
+        sizeBytes: fileSize,
+        sourceTitle: fileName,
+        dateAddedSecs: takenAtMs ~/ 1000,
+        dateModifiedMillis: modifiedAtMs,
+        sourceDateTakenMillis: takenAtMs,
+        durationMillis: durationMs > 0 ? durationMs : null,
+        trashed: false,
+        origin: EntryOrigins.cloud,
+      );
+      cloudEntries.add(entry);
+      _entryBySha256[sha256.toLowerCase()] = entry;
+      if (thumbHash.isNotEmpty && thumbHash != sha256) {
+        _entryBySha256[thumbHash.toLowerCase()] = entry;
+      }
+    }
         rotationDegrees: 0,
         sizeBytes: fileSize,
         sourceTitle: fileName,
@@ -633,28 +668,36 @@ class CloudSyncService {
         final file = File(filePath);
         if (!await file.exists()) continue;
 
+        final fileLen = await file.length();
         final date = entry.bestDate ?? DateTime.fromMillisecondsSinceEpoch(entry.sourceDateTakenMillis ?? 0);
         final yyyy = date.year.toString();
         final mm = date.month.toString().padLeft(2, '0');
         final dd = date.day.toString().padLeft(2, '0');
         final fileName = p.basename(filePath);
         final relPath = '手机/$yyyy/$yyyy-$mm-$dd/$fileName';
+        final dedupKey = '$relPath:$fileLen';
+
+        if (backedUpFiles.contains(dedupKey) || backedUpFiles.contains(fileName)) {
+          continue;
+        }
 
         try {
-          final bytes = await file.readAsBytes();
           final uploadUri = Uri.parse('$baseUrl/api/upload?path=${Uri.encodeComponent(relPath)}&op_type=BACKUP_PHOTO');
-          final resp = await http.post(
-            uploadUri,
-            headers: {
+          final req = http.StreamedRequest('POST', uploadUri)
+            ..headers.addAll({
               'Content-Type': 'application/octet-stream',
               'x-relative-path': Uri.encodeComponent(relPath),
               'x-op-type': 'BACKUP_PHOTO',
-            },
-            body: bytes,
-          ).timeout(const Duration(seconds: 40));
+            })
+            ..contentLength = fileLen;
+
+          unawaited(file.openRead().pipe(req.sink));
+          final streamedResp = await req.send().timeout(const Duration(minutes: 2));
+          final resp = await http.Response.fromStream(streamedResp);
 
           if (resp.statusCode == 200) {
             uploaded++;
+            backedUpFiles.add(dedupKey);
             backedUpFiles.add(fileName);
             await settings.store.setStringList('backed_up_local_files', backedUpFiles.toList());
             debugPrint('Auto-backup: [$uploaded/${toBackup.length}] uploaded $fileName -> $relPath');

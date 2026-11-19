@@ -121,10 +121,10 @@ class _EntryPageViewState extends State<EntryPageView> with TickerProviderStateM
         Widget? child;
         if (entry.isSvg) {
           child = _buildSvgView();
+        } else if (entry.isVideo) {
+          child = _buildVideoView();
         } else if (!entry.displaySize.isEmpty) {
-          if (entry.isVideo) {
-            child = _buildVideoView();
-          } else if (entry.isDecodingSupported) {
+          if (entry.isDecodingSupported) {
             child = _buildRasterView();
           }
         }

@@ -52,6 +52,7 @@ import kotlin.math.min
  */
 
 object AppLogger {
+    private val logLock = Any()
     private val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
 
     fun log(context: Context?, msg: String) {
@@ -59,14 +60,16 @@ object AppLogger {
         if (context == null) return
         try {
             val logFile = File(context.filesDir, "cloud_debug.log")
-            val time = sdf.format(java.util.Date())
-            val line = "[$time] $msg\n"
-            logFile.appendText(line, java.nio.charset.StandardCharsets.UTF_8)
-            // 控制文件大小不超过 2MB
-            if (logFile.length() > 2 * 1024 * 1024L) {
-                val lines = logFile.readLines()
-                if (lines.size > 2000) {
-                    logFile.writeText(lines.takeLast(1000).joinToString("\n") + "\n")
+            synchronized(logLock) {
+                val time = sdf.format(java.util.Date())
+                val line = "[$time] $msg\n"
+                logFile.appendText(line, java.nio.charset.StandardCharsets.UTF_8)
+                // 控制文件大小不超过 2MB
+                if (logFile.length() > 2 * 1024 * 1024L) {
+                    val lines = logFile.readLines()
+                    if (lines.size > 2000) {
+                        logFile.writeText(lines.takeLast(1000).joinToString("\n") + "\n")
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -398,11 +401,13 @@ object GoogleDriveSafManager : EventChannel.StreamHandler {
         val cached = getLocalOriginalIfPresent(context, normalized)
         if (cached != null) return@withContext cached
 
-        if (!downloadingOriginals.add(normalized)) {
-            // 已有协程正在拉取该原图，等待已有协程写完
-            return@withContext null
+        val newFuture = CompletableFuture<File?>()
+        val existing = waiters.putIfAbsent(normalized, newFuture)
+        if (existing != null) {
+            return@withContext runCatching { existing.get(60, TimeUnit.SECONDS) }.getOrNull()
         }
 
+        var resultFile: File? = null
         try {
             val docId = getDocumentIdByPath(context, rootUri, relPath)
             if (docId == null) {
@@ -428,6 +433,7 @@ object GoogleDriveSafManager : EventChannel.StreamHandler {
                     tmpFile.delete()
                 }
                 notifyOriginalReady(normalized)
+                resultFile = targetFile
                 return@withContext targetFile
             } else {
                 tmpFile.delete()
@@ -435,7 +441,8 @@ object GoogleDriveSafManager : EventChannel.StreamHandler {
         } catch (e: Exception) {
             Log.e(TAG, "Failed downloading original for $normalized ($relPath)", e)
         } finally {
-            downloadingOriginals.remove(normalized)
+            newFuture.complete(resultFile)
+            waiters.remove(normalized, newFuture)
         }
         return@withContext null
     }

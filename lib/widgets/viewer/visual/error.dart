@@ -32,7 +32,7 @@ class _ErrorViewState extends State<ErrorView> {
   void initState() {
     super.initState();
     final path = entry.storagePath;
-    _exists = path != null ? File(path).exists() : SynchronousFuture(true);
+    _exists = (entry.origin == EntryOrigins.cloud || path == null) ? SynchronousFuture(true) : File(path).exists();
   }
 
   @override
