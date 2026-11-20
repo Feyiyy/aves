@@ -427,6 +427,7 @@ class CloudSyncService {
       final queryParams = <String, String>{
         'rel': rawRelPath,
         'thumb': thumbName,
+        if (fileSize > 0) 'size': '$fileSize',
         if (hasPack) ...{
           'pack': packId,
           'off': '$packOffset',

@@ -584,7 +584,7 @@ object StorageUtils {
         val uri = contentAddress.uri
 
         if (uri.scheme == "cloudgallery") {
-            val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
+            val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri, sizeBytes) }
             return if (original != null && original.exists() && original.length() > 0L) {
                 Log.i("CloudDebug", "[Glide] Hit Real Original: $uri (${original.length()} bytes) -> ${original.absolutePath}")
                 Uri.fromFile(original)

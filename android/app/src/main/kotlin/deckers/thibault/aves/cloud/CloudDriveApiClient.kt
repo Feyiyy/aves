@@ -67,7 +67,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
     private const val KEY_ACCESS_TOKEN = "oauth_access_token"
     private const val KEY_REFRESH_TOKEN = "oauth_refresh_token"
     private const val KEY_TOKEN_EXPIRY_MS = "oauth_token_expiry_ms"
-    private const val KEY_DRIVE_ROOT_ID = "drive_root_folder_id"
+    private const val KEY_DRIVE_ROOT_ID = "drive_root_folder_id_v2"
     private const val KEY_DRIVE_ROOT_NAME = "drive_root_folder_name"
 
     private const val GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -188,7 +188,10 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         oauthClientSecret?.let { editor.putString(KEY_CLIENT_SECRET, it.trim()) }
         driveRootFolderName?.let {
             editor.putString(KEY_DRIVE_ROOT_NAME, it.trim())
-            if (driveRootFolderId == null) editor.remove(KEY_DRIVE_ROOT_ID)
+            if (driveRootFolderId == null) {
+                editor.remove(KEY_DRIVE_ROOT_ID)
+                editor.remove("drive_root_folder_id")
+            }
         }
         driveRootFolderId?.let { editor.putString(KEY_DRIVE_ROOT_ID, it.trim()) }
         editor.apply()
@@ -213,6 +216,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
             .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_TOKEN_EXPIRY_MS)
             .remove(KEY_DRIVE_ROOT_ID)
+            .remove("drive_root_folder_id")
             .apply()
         pathToFileIdCache.clear()
         packFileIdCache.clear()
@@ -453,34 +457,106 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
 
     private fun escapeQ(v: String): String = v.replace("\\", "\\\\").replace("'", "\\'")
 
-    fun resolveDriveRootFolderId(context: Context, token: String): String? {
-        val sp = prefs(context)
-        sp.getString(KEY_DRIVE_ROOT_ID, null)?.takeIf { it.isNotBlank() }?.let { return it }
+    private val lastPathDiagnostics = ConcurrentHashMap<String, String>()
 
-        // 优先通过唯一的 .cloudgallery 反查其父目录
-        val qCloud = "name = '$CLOUD_DIR' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val cloudUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qCloud)}&fields=${urlEncode("files(id,parents)")}&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true"
-        val cloudObj = driveApiGetJson(context, token, cloudUrl)?.optJSONArray("files")?.optJSONObject(0)
-        val cloudId = cloudObj?.optString("id").orEmpty()
-        val parentId = cloudObj?.optJSONArray("parents")?.optString(0).orEmpty()
-        if (cloudId.isNotBlank() && parentId.isNotBlank()) {
-            sp.edit().putString(KEY_DRIVE_ROOT_ID, parentId).apply()
-            pathToFileIdCache[CLOUD_DIR] = cloudId
-            Log.i("CloudDebug", "[DriveRoot] found via .cloudgallery: parentId=$parentId cloudId=$cloudId")
-            return parentId
+    fun getLastPathDiagnostic(cleanPath: String): String? = lastPathDiagnostics[cleanPath]
+
+    fun resolveDriveRootFolderId(context: Context, token: String, bypassCache: Boolean = false): String? {
+        val sp = prefs(context)
+        if (sp.contains("drive_root_folder_id")) {
+            sp.edit().remove("drive_root_folder_id").apply()
+            Log.i("CloudDebug", "[DriveRoot] Cleared legacy drive_root_folder_id from prefs")
+        }
+        if (!bypassCache) {
+            sp.getString(KEY_DRIVE_ROOT_ID, null)?.takeIf { it.isNotBlank() }?.let { return it }
         }
 
+        // 1. 查询所有名为 .cloudgallery 且 trashed = false 的文件夹（按最近修改排序）
+        val qCloud = "name = '$CLOUD_DIR' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        val cloudUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qCloud)}&fields=${urlEncode("files(id,parents,modifiedTime)")}&pageSize=20&orderBy=${urlEncode("modifiedTime desc")}&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val cloudFiles = driveApiGetJson(context, token, cloudUrl)?.optJSONArray("files")
+
+        var bestParentId: String? = null
+        var bestCloudId: String? = null
+        var firstCandidateParentId: String? = null
+        var firstCandidateCloudId: String? = null
+
+        if (cloudFiles != null && cloudFiles.length() > 0) {
+            for (idx in 0 until cloudFiles.length()) {
+                val cObj = cloudFiles.optJSONObject(idx) ?: continue
+                val cId = cObj.optString("id")
+                val pId = cObj.optJSONArray("parents")?.optString(0).orEmpty()
+                val modTime = cObj.optString("modifiedTime")
+                if (pId.isBlank()) continue
+                if (firstCandidateParentId == null) {
+                    firstCandidateParentId = pId
+                    firstCandidateCloudId = cId
+                }
+
+                // 检查该父目录下是否还存在除 .cloudgallery 之外的其他子文件夹（说明是真正存放照片的图库根目录）
+                val qSiblings = "'$pId' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+                val sibUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qSiblings)}&fields=${urlEncode("files(id,name)")}&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true"
+                val sibFiles = driveApiGetJson(context, token, sibUrl)?.optJSONArray("files")
+                val siblingNames = mutableListOf<String>()
+                if (sibFiles != null) {
+                    for (sIdx in 0 until sibFiles.length()) {
+                        val sName = sibFiles.optJSONObject(sIdx)?.optString("name").orEmpty()
+                        if (sName.isNotEmpty() && !sName.equals(CLOUD_DIR, ignoreCase = true)) {
+                            siblingNames.add(sName)
+                        }
+                    }
+                }
+                Log.i("CloudDebug", "[DriveRoot] candidate #$idx cId=$cId pId=$pId modTime=$modTime siblingFolders=$siblingNames")
+                if (siblingNames.isNotEmpty()) {
+                    bestParentId = pId
+                    bestCloudId = cId
+                    Log.i("CloudDebug", "[DriveRoot] Selected parentId=$pId as root (has sibling folders: $siblingNames, modTime=$modTime)")
+                    break
+                }
+            }
+        }
+
+        val selectedParentId = bestParentId ?: firstCandidateParentId
+        val selectedCloudId = bestCloudId ?: firstCandidateCloudId
+        if (!selectedParentId.isNullOrBlank()) {
+            sp.edit().putString(KEY_DRIVE_ROOT_ID, selectedParentId).apply()
+            if (!selectedCloudId.isNullOrBlank()) {
+                pathToFileIdCache[CLOUD_DIR] = selectedCloudId
+            }
+            logTopLevelItems(context, token, selectedParentId)
+            return selectedParentId
+        }
+
+        // 2. 兜底尝试按配置的 rootName 查找
         val rootName = sp.getString(KEY_DRIVE_ROOT_NAME, "图片")?.trim().orEmpty().ifEmpty { "图片" }
         val qRoot = "name = '${escapeQ(rootName)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val rootUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qRoot)}&fields=${urlEncode("files(id)")}&pageSize=2&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val rootUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qRoot)}&fields=${urlEncode("files(id)")}&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true"
         val rootId = driveApiGetJson(context, token, rootUrl)?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
         Log.i("CloudDebug", "[DriveRoot] resolved rootName='$rootName' -> rootId=$rootId")
         if (!rootId.isNullOrBlank()) {
             sp.edit().putString(KEY_DRIVE_ROOT_ID, rootId).apply()
+            logTopLevelItems(context, token, rootId)
             return rootId
         }
         Log.w("CloudDebug", "[DriveRoot] failed to resolve rootId on Google Drive!")
         return null
+    }
+
+    private fun logTopLevelItems(context: Context, token: String, rootId: String) {
+        try {
+            val qTop = "'$rootId' in parents and trashed = false"
+            val topUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qTop)}&fields=${urlEncode("files(name,mimeType)")}&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true"
+            val files = driveApiGetJson(context, token, topUrl)?.optJSONArray("files")
+            val names = mutableListOf<String>()
+            if (files != null) {
+                for (i in 0 until files.length()) {
+                    files.optJSONObject(i)?.optString("name")?.let { if (it.isNotEmpty()) names.add(it) }
+                }
+            }
+            Log.i("CloudDebug", "[DriveRoot] rootId=$rootId top-level items: $names")
+        } catch (e: Exception) {
+            Log.w("CloudDebug", "[DriveRoot] logTopLevelItems failed: ${e.message}")
+        }
     }
 
     fun resolveDriveFileIdByPath(
@@ -502,29 +578,156 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         if (clean.isEmpty()) return null
         if (!bypassCache) pathToFileIdCache[clean]?.let { return it }
 
-        var parentId = resolveDriveRootFolderId(context, token) ?: return null
+        val rootId = resolveDriveRootFolderId(context, token, bypassCache = bypassCache) ?: return null
         val segments = clean.split('/').filter { it.isNotEmpty() }
-        for (i in segments.indices) {
-            val seg = segments[i]
-            val subKey = segments.subList(0, i + 1).joinToString("/")
-            val cached = if (bypassCache && i == segments.lastIndex) null else pathToFileIdCache[subKey]
-            if (cached != null) {
-                parentId = cached
+        if (segments.isEmpty()) return null
+
+        return searchSegmentCandidates(context, token, listOf(rootId), 0, segments, bypassCache, clean, rootId)
+    }
+
+    private fun searchSegmentCandidates(
+        context: Context,
+        token: String,
+        parentIds: List<String>,
+        segmentIndex: Int,
+        segments: List<String>,
+        bypassCache: Boolean,
+        cleanPath: String,
+        rootId: String,
+    ): String? {
+        if (segmentIndex >= segments.size) return null
+        val seg = segments[segmentIndex]
+        val isLast = (segmentIndex == segments.lastIndex)
+        val subKey = segments.subList(0, segmentIndex + 1).joinToString("/")
+
+        if (!bypassCache && pathToFileIdCache.containsKey(subKey)) {
+            val cachedId = pathToFileIdCache[subKey]!!
+            if (isLast) return cachedId
+            val found = searchSegmentCandidates(
+                context, token, listOf(cachedId), segmentIndex + 1, segments, bypassCache, cleanPath, rootId
+            )
+            if (found != null) return found
+            pathToFileIdCache.remove(subKey)
+        }
+
+        val mimeFilter = if (isLast) "" else " and mimeType = 'application/vnd.google-apps.folder'"
+        for (pId in parentIds) {
+            val q = "'$pId' in parents and name = '${escapeQ(seg)}'$mimeFilter and trashed = false"
+            val queryUrl = "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id,name,mimeType)")}&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true"
+            val fileArr = driveApiGetJson(context, token, queryUrl)?.optJSONArray("files")
+            val matches = mutableListOf<String>()
+            if (fileArr != null) {
+                for (j in 0 until fileArr.length()) {
+                    val id = fileArr.optJSONObject(j)?.optString("id").orEmpty()
+                    if (id.isNotBlank()) matches.add(id)
+                }
+            }
+            Log.i("CloudDebug", "[DrivePath] pId=$pId seg='$seg' (depth=$segmentIndex/${segments.size}) matches=${matches.size}")
+
+            if (matches.isEmpty()) {
+                try {
+                    val qActual = "'$pId' in parents and trashed = false"
+                    val actualUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qActual)}&fields=${urlEncode("files(name)")}&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true"
+                    val actualArr = driveApiGetJson(context, token, actualUrl)?.optJSONArray("files")
+                    val actualNames = mutableListOf<String>()
+                    if (actualArr != null) {
+                        for (k in 0 until actualArr.length()) {
+                            actualArr.optJSONObject(k)?.optString("name")?.let { if (it.isNotEmpty()) actualNames.add(it) }
+                        }
+                    }
+                    val diag = "断在[$seg] rootId=$rootId 实际子项=$actualNames"
+                    lastPathDiagnostics[cleanPath] = diag
+                    Log.w("CloudDebug", "[DrivePath] $diag")
+                } catch (_: Exception) {}
                 continue
             }
-            val mimeFilter = if (i == segments.lastIndex) "" else " and mimeType = 'application/vnd.google-apps.folder'"
-            val q = "'$parentId' in parents and name = '${escapeQ(seg)}'$mimeFilter and trashed = false"
-            val queryUrl = "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id)")}&pageSize=2&supportsAllDrives=true&includeItemsFromAllDrives=true"
-            val id = driveApiGetJson(context, token, queryUrl)?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
-            Log.i("CloudDebug", "[DrivePath] parentId=$parentId seg='$seg' -> fileId=$id")
-            if (id.isNullOrBlank()) {
-                Log.w("CloudDebug", "[DrivePath] segment '$seg' not found under parentId=$parentId")
-                return null
+
+            if (isLast) {
+                val chosenId = matches[0]
+                pathToFileIdCache[cleanPath] = chosenId
+                return chosenId
             }
-            pathToFileIdCache[subKey] = id
-            parentId = id
+
+            for (candidateId in matches) {
+                val found = searchSegmentCandidates(
+                    context, token, listOf(candidateId), segmentIndex + 1, segments, bypassCache, cleanPath, rootId
+                )
+                if (found != null) {
+                    pathToFileIdCache[subKey] = candidateId
+                    return found
+                }
+            }
         }
-        return parentId
+        return null
+    }
+
+    fun fallbackFindDriveFileId(
+        context: Context,
+        relPath: String,
+        token: String,
+        rootId: String?,
+        expectedSizeBytes: Long? = null,
+    ): String? {
+        val clean = relPath.trim().replace('\\', '/').trimStart('/')
+        val fileName = clean.substringAfterLast('/')
+        if (fileName.isBlank()) return null
+
+        Log.i("CloudDebug", "[OrigFallback] Searching by fileName='$fileName' expectedSize=$expectedSizeBytes")
+        val q = "name = '${escapeQ(fileName)}' and trashed = false"
+        val url = "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id,name,size,parents,modifiedTime)")}&pageSize=10&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val json = driveApiGetJson(context, token, url)
+        val files = json?.optJSONArray("files")
+        if (files == null || files.length() == 0) {
+            Log.w("CloudDebug", "[OrigFallback] No files found matching name='$fileName'")
+            return null
+        }
+
+        if (files.length() == 1) {
+            val fObj = files.getJSONObject(0)
+            val fileId = fObj.optString("id")
+            if (fileId.isNotBlank()) {
+                pathToFileIdCache[clean] = fileId
+                Log.i("CloudDebug", "[OrigFallback] Exactly 1 candidate found: id=$fileId name='$fileName'")
+                return fileId
+            }
+        }
+
+        data class Candidate(val id: String, val size: Long, val parents: List<String>, val modifiedTime: String, var score: Int = 0)
+        val candidates = mutableListOf<Candidate>()
+        for (i in 0 until files.length()) {
+            val obj = files.optJSONObject(i) ?: continue
+            val id = obj.optString("id")
+            if (id.isBlank()) continue
+            val size = obj.optLong("size", -1L)
+            val pList = mutableListOf<String>()
+            val pArr = obj.optJSONArray("parents")
+            if (pArr != null) {
+                for (p in 0 until pArr.length()) {
+                    val pStr = pArr.optString(p)
+                    if (pStr.isNotEmpty()) pList.add(pStr)
+                }
+            }
+            val modTime = obj.optString("modifiedTime")
+            candidates.add(Candidate(id, size, pList, modTime))
+        }
+
+        if (candidates.isEmpty()) return null
+
+        for (cand in candidates) {
+            if (expectedSizeBytes != null && expectedSizeBytes > 0L && cand.size == expectedSizeBytes) {
+                cand.score += 100
+            }
+            if (rootId != null && cand.parents.contains(rootId)) {
+                cand.score += 50
+            }
+        }
+
+        candidates.sortWith(compareByDescending<Candidate> { it.score }.thenByDescending { it.modifiedTime })
+
+        val chosen = candidates[0]
+        Log.i("CloudDebug", "[OrigFallback] Picked candidate id=${chosen.id} score=${chosen.score} size=${chosen.size} mod=${chosen.modifiedTime} (total=${candidates.size})")
+        pathToFileIdCache[clean] = chosen.id
+        return chosen.id
     }
 
     private fun resolvePackFileId(
@@ -790,6 +993,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         token: String,
         rangeHeader: String?,
         itemId: String = "",
+        expectedSizeBytes: Long? = null,
     ): Boolean {
         val rootId = resolveDriveRootFolderId(context, token)
         if (rootId == null) {
@@ -798,19 +1002,29 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
             return false
         }
 
-        val fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false)
+        val clean = relPath.trim().replace('\\', '/').trimStart('/')
+        var fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false)
         if (fileId == null) {
-            if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive路径404: $relPath (rootId=$rootId)")
+            Log.i("CloudDebug", "[Orig] Path resolution returned null for $relPath, trying fallback...")
+            fileId = fallbackFindDriveFileId(context, relPath, token, rootId, expectedSizeBytes)
+        }
+        if (fileId == null) {
+            val diag = lastPathDiagnostics[clean] ?: "断在未知段 rootId=$rootId"
+            if (itemId.isNotEmpty()) setLastOriginalError(itemId, diag)
             return false
         }
 
         val first = downloadDriveToFile(context, fileId, target, token, rangeHeader)
         if (first.success) return true
         if (first.httpCode == 404) {
-            pathToFileIdCache.remove(relPath.trim().replace('\\', '/').trimStart('/'))
-            val refreshedId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true)
+            pathToFileIdCache.remove(clean)
+            var refreshedId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true)
             if (refreshedId == null) {
-                if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive路径404重试未找到: $relPath")
+                refreshedId = fallbackFindDriveFileId(context, relPath, token, rootId, expectedSizeBytes)
+            }
+            if (refreshedId == null) {
+                val diag = lastPathDiagnostics[clean] ?: "重试未找到 rootId=$rootId"
+                if (itemId.isNotEmpty()) setLastOriginalError(itemId, diag)
                 return false
             }
             val second = downloadDriveToFile(context, refreshedId, target, token, rangeHeader)
@@ -842,9 +1056,15 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         return null
     }
 
-    suspend fun fetchOriginal(context: Context, uri: Uri): File? = withContext(Dispatchers.IO) {
+    suspend fun fetchOriginal(
+        context: Context,
+        uri: Uri,
+        expectedSize: Long? = null,
+    ): File? = withContext(Dispatchers.IO) {
         val itemId = (uri.host ?: uri.authority)?.trim()?.lowercase().orEmpty()
         var relPath = uri.getQueryParameter("rel")?.trim().orEmpty()
+        val sizeParam = uri.getQueryParameter("size")?.toLongOrNull() ?: uri.getQueryParameter("len")?.toLongOrNull()
+        val effectiveExpectedSize = expectedSize ?: sizeParam
         if (itemId.isEmpty() || relPath.isEmpty()) {
             setLastOriginalError(itemId, "无效云端URI参数 (itemId=$itemId, rel=$relPath)")
             return@withContext null
@@ -895,7 +1115,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
                     val msg = "$lanFailedReason, 且Google Drive未授权登录"
                     setLastOriginalError(itemId, msg)
                 } else {
-                    ok = downloadDrivePathWithRetry(context, relPath, target, token, null, itemId)
+                    ok = downloadDrivePathWithRetry(context, relPath, target, token, null, itemId, effectiveExpectedSize)
                     Log.i("CloudDebug", "[Orig] Drive download finished ok=$ok targetLen=${if (target.exists()) target.length() else -1}")
                 }
             }
@@ -1051,7 +1271,11 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
             }
 
             var token = getValidAccessTokenBlocking(context) ?: return null
-            var fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false) ?: return null
+            val rootId = resolveDriveRootFolderId(context, token)
+            var fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false)
+            if (fileId == null) {
+                fileId = fallbackFindDriveFileId(context, relPath, token, rootId) ?: return null
+            }
             for (attempt in 0..1) {
                 val conn = (URL("$DRIVE_API_BASE/files/$fileId?alt=media").openConnection() as HttpURLConnection).apply {
                     requestMethod = if (method == "HEAD") "HEAD" else "GET"
@@ -1069,7 +1293,10 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
                 if (code == 404 && attempt == 0) {
                     conn.disconnect()
                     pathToFileIdCache.remove(relPath.trim().replace('\\', '/').trimStart('/'))
-                    fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true) ?: return null
+                    fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true)
+                    if (fileId == null) {
+                        fileId = fallbackFindDriveFileId(context, relPath, token, rootId) ?: return null
+                    }
                     continue
                 }
                 return conn
