@@ -651,7 +651,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         return if (file.isFile && file.length() > 0L) file else null
     }
 
-    private fun thumbTargetFile(context: Context, key: String): File {
+    fun thumbTargetFile(context: Context, key: String): File {
         val clean = key.lowercase().trim().removeSuffix(".webp")
         val dir = File(getThumbRootDir(context), clean.take(2).padEnd(2, '0')).apply { if (!exists()) mkdirs() }
         return File(dir, "$clean.webp")

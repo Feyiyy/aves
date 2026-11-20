@@ -2,6 +2,7 @@ package deckers.thibault.aves.decoding
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
@@ -14,6 +15,7 @@ import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.bumptech.glide.request.RequestOptions
 import com.bumptech.glide.signature.ObjectKey
 import deckers.thibault.aves.channel.streams.darttoplatform.ByteSink
+import deckers.thibault.aves.cloud.CloudDriveApiClient
 import deckers.thibault.aves.glide.AvesAppGlideModule
 import deckers.thibault.aves.glide.MultiPageImage
 import deckers.thibault.aves.model.ContentAddress
@@ -28,7 +30,12 @@ import deckers.thibault.aves.utils.MimeTypes.isVideo
 import deckers.thibault.aves.utils.MimeTypes.needRotationAfterContentResolverThumbnail
 import deckers.thibault.aves.utils.MimeTypes.needRotationAfterGlide
 import deckers.thibault.aves.utils.UriUtils.tryParseId
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.util.HashMap
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -204,7 +211,19 @@ class ThumbnailFetcher internal constructor(
     }
 
     private suspend fun fetchCloudGalleryThumbnail() {
-        val localFile = deckers.thibault.aves.cloud.CloudDriveApiClient.fetchThumbnail(context, uri)
+        var localFile = CloudDriveApiClient.fetchThumbnail(context, uri)
+
+        if ((localFile == null || !localFile.exists() || localFile.length() == 0L) &&
+            (isVideo(mimeType) || mimeType.startsWith("video/"))
+        ) {
+            val proxyUrl = CloudDriveApiClient.getVideoStreamProxyUrl(context, uri)
+            if (!proxyUrl.isNullOrEmpty()) {
+                val extractedFile = extractVideoThumb(context, uri, proxyUrl)
+                if (extractedFile != null && extractedFile.exists() && extractedFile.length() > 0L) {
+                    localFile = extractedFile
+                }
+            }
+        }
 
         if (localFile != null && localFile.exists() && localFile.length() > 0L) {
             try {
@@ -233,6 +252,42 @@ class ThumbnailFetcher internal constructor(
         }
 
         result.error("getThumbnail-cloud-waiting", "Cloud thumbnail pending: $uri", null)
+    }
+
+    private suspend fun extractVideoThumb(context: Context, uri: Uri, proxyUrl: String): File? = withContext(Dispatchers.IO) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(proxyUrl, HashMap<String, String>())
+            val frame: Bitmap? = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.frameAtTime
+            if (frame != null) {
+                val itemId = (uri.host ?: uri.authority)?.trim()?.lowercase().orEmpty()
+                val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase().orEmpty()
+                val clean = (if (thumbParam.isNotEmpty()) thumbParam.removeSuffix(".webp") else itemId).takeIf { it.isNotEmpty() } ?: itemId
+                val targetFile = CloudDriveApiClient.thumbTargetFile(context, clean)
+                val tmpFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                FileOutputStream(tmpFile).use { out ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        frame.compress(Bitmap.CompressFormat.WEBP_LOSSY, 85, out)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        frame.compress(Bitmap.CompressFormat.WEBP, 85, out)
+                    }
+                }
+                if (tmpFile.renameTo(targetFile)) {
+                    return@withContext targetFile
+                } else if (tmpFile.exists()) {
+                    return@withContext tmpFile
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "Failed to extract video thumbnail via proxy: $proxyUrl", e)
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
+        null
     }
 
     companion object {

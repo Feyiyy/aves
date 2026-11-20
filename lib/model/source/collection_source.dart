@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:aves/model/covers.dart';
 import 'package:aves/model/entry/entry.dart';
+import 'package:aves/model/entry/origins.dart';
+import 'package:path/path.dart' as p;
 import 'package:aves/model/entry/extensions/catalog.dart';
 import 'package:aves/model/entry/extensions/keys.dart';
 import 'package:aves/model/entry/extensions/location.dart';
@@ -173,7 +175,35 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
       TrashFilter.instance,
       ..._getAppHiddenFilters(),
     };
-    return entries.where((entry) => !hiddenFilters.any((filter) => filter.test(entry)));
+
+    // 核心视图层 O(N) 实时去重：收集未进回收站的本地条目指纹集合 (fileName.toLowerCase():sizeBytes)
+    final localFingerprints = <String>{};
+    for (final entry in _entriesById.values) {
+      if (entry.origin != EntryOrigins.cloud && !entry.trashed) {
+        final sizeBytes = entry.sizeBytes;
+        if (sizeBytes != null && sizeBytes > 0) {
+          final fileName = entry.path != null ? p.basename(entry.path!) : (entry.sourceTitle ?? '');
+          if (fileName.isNotEmpty) {
+            localFingerprints.add('${fileName.toLowerCase()}:$sizeBytes');
+          }
+        }
+      }
+    }
+
+    return entries.where((entry) {
+      if (hiddenFilters.any((filter) => filter.test(entry))) return false;
+      // 若为云端副本且命中本地同名同大小实体，隐藏云端副本（保留在数据库，本地删除后自动重新浮现）
+      if (entry.origin == EntryOrigins.cloud) {
+        final sizeBytes = entry.sizeBytes;
+        if (sizeBytes != null && sizeBytes > 0) {
+          final fileName = entry.path != null ? p.basename(entry.path!) : (entry.sourceTitle ?? '');
+          if (fileName.isNotEmpty && localFingerprints.contains('${fileName.toLowerCase()}:$sizeBytes')) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
   }
 
   Iterable<AvesEntry> _applyTrashFilter(Iterable<AvesEntry> entries) {

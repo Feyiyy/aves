@@ -269,6 +269,21 @@ class CloudSyncService {
         }
       }
 
+      // 清理历史残留脏数据（如旧的非 cloudgallery:// 开头的云端条目，必须在版本命中提前返回之前执行）
+      final legacyUris = source.allEntries
+          .where((e) => e.origin == EntryOrigins.cloud && !e.uri.startsWith('cloudgallery://'))
+          .map((e) => e.uri)
+          .toSet();
+      if (legacyUris.isNotEmpty) {
+        debugPrint('CloudSyncService: Removing ${legacyUris.length} legacy non-cloudgallery entries...');
+        _isPurgingDeletedEntries = true;
+        try {
+          await source.removeEntries(legacyUris, includeTrash: true);
+        } finally {
+          _isPurgingDeletedEntries = false;
+        }
+      }
+
       final localSnapshotVersion = settings.store.getInt('cloud_snapshot_version') ?? 0;
       debugPrint('CloudSyncService: invoking syncMasterSnapshot (localVer: $localSnapshotVersion)...');
 
@@ -354,19 +369,7 @@ class CloudSyncService {
       _isPurgingDeletedEntries = false;
     }
 
-    // 2. 本地现有条目指纹集合（用于对齐手机备份照片与云端去重，避免时间轴重复）
-    final localSignatures = <String>{};
-    for (final e in source.allEntries) {
-      if (e.origin != EntryOrigins.cloud) {
-        final name = (e.sourceTitle ?? (e.path != null ? p.basename(e.path!) : '')).toLowerCase();
-        final size = e.sizeBytes ?? 0;
-        if (name.isNotEmpty && size > 0) {
-          localSignatures.add('$name:$size');
-        }
-      }
-    }
-
-    // 3. 构建 O(1) 现有条目映射
+    // 2. 构建 O(1) 现有条目映射
     final existingByUri = <String, AvesEntry>{
       for (final e in source.allEntries)
         if (e.origin == EntryOrigins.cloud) e.uri: e,
@@ -389,14 +392,6 @@ class CloudSyncService {
       final thumbRelPath = (row['thumb_rel_path'] as String?) ?? '';
       final thumbName = thumbRelPath.isNotEmpty ? thumbRelPath.split('/').last : '$sha256.webp';
       final thumbHash = thumbName.replaceAll('.webp', '');
-
-      // 本地/云端去重：若为手机上传备份且本地已有同 (fileName, sizeBytes) 实体，跳过插入
-      if (relPath.startsWith('手机/')) {
-        final dedupKey = '${fileName.toLowerCase()}:$fileSize';
-        if (localSignatures.contains(dedupKey)) {
-          continue;
-        }
-      }
 
       final packId = row['pack_id'] as String?;
       final packOffset = row['pack_offset'] as num?;

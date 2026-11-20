@@ -130,7 +130,8 @@ android {
             if (signingConfigs.names.contains("release")) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
-                println("Skip release signing as it is not configured")
+                signingConfig = signingConfigs.getByName("debug")
+                println("Using debug signingConfig for release build")
             }
             isMinifyEnabled = true
             isShrinkResources = true
