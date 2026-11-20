@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:aves/model/covers.dart';
-import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/entry/extensions/catalog.dart';
 import 'package:aves/model/entry/extensions/keys.dart';
@@ -259,7 +258,6 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
     _disposeEntries((id, _) => oldIds.contains(id));
     updateDerivedFilters(oldEntries);
     eventBus.fire(EntryRemovedEvent(oldEntries));
-    unawaited(cloudSyncService.onEntriesDeleted(oldEntries));
   }
 
   void clearEntries() {

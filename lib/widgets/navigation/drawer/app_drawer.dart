@@ -231,21 +231,13 @@ class _AppDrawerState extends State<AppDrawer> with WidgetsBindingObserver, Feed
                 children: [
                   OutlinedButton.icon(
                     key: const Key('drawer-cloud-button'),
-                    onPressed: () async {
-                      Navigator.maybeOf(context)?.pop();
+                    onPressed: () {
                       final source = context.read<CollectionSource>();
-                      final ok = await cloudSyncService.mountGoogleDriveSaf(source);
-                      if (context.mounted) {
-                        showFeedback(
-                          context,
-                          FeedbackType.info,
-                          ok ? 'Google 云端硬盘相册挂载成功' : '未选择或挂载失败',
-                        );
-                      }
+                      _showCloudSettingsDialog(context, source);
                     },
                     style: drawerButtonStyle,
                     icon: const Icon(Icons.cloud_outlined),
-                    label: const Text('挂载云端硬盘'),
+                    label: const Text('云端设置与同步'),
                   ),
                   OutlinedButton.icon(
                     // key is expected by test driver
@@ -441,4 +433,160 @@ class _AppDrawerState extends State<AppDrawer> with WidgetsBindingObserver, Feed
     key: Key('drawer-debug'),
     navItem: AvesNavItem(route: AppDebugPage.routeName),
   );
+
+  void _showCloudSettingsDialog(BuildContext context, CollectionSource source) async {
+    final status = await cloudSyncService.refreshStatus();
+    final lanUrlController = TextEditingController(
+      text: settings.store.getString('cloud_lan_url') ?? (status?['lan_url'] as String?) ?? 'http://192.168.5.3:8088',
+    );
+    final lanTokenController = TextEditingController(
+      text: settings.store.getString('cloud_lan_token') ?? (status?['lan_token'] as String?) ?? '',
+    );
+    final clientIdController = TextEditingController(
+      text: settings.store.getString('cloud_oauth_client_id') ?? (status?['oauth_client_id'] as String?) ?? '',
+    );
+    final clientSecretController = TextEditingController(
+      text: settings.store.getString('cloud_oauth_client_secret') ?? (status?['oauth_client_secret'] as String?) ?? '',
+    );
+
+    if (!context.mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.cloud_sync, color: Colors.blue),
+              SizedBox(width: 8),
+              Text('云端相册与 Drive 设置'),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: lanUrlController,
+                  decoration: const InputDecoration(
+                    labelText: '局域网服务地址 (LAN URL)',
+                    hintText: 'http://192.168.5.3:8088',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: lanTokenController,
+                  decoration: const InputDecoration(
+                    labelText: '局域网 API Token (可选)',
+                    hintText: '留空表示无密码',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: clientIdController,
+                  decoration: const InputDecoration(
+                    labelText: 'Google OAuth Client ID',
+                    hintText: 'xxxx.apps.googleusercontent.com',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: clientSecretController,
+                  decoration: const InputDecoration(
+                    labelText: 'Google OAuth Client Secret (可选)',
+                    hintText: '桌面客户端或免审核秘钥',
+                    isDense: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            OutlinedButton(
+              onPressed: () async {
+                final lanUrl = lanUrlController.text.trim();
+                final lanToken = lanTokenController.text.trim();
+                final clientId = clientIdController.text.trim();
+                final clientSecret = clientSecretController.text.trim();
+
+                await settings.store.setString('cloud_lan_url', lanUrl);
+                await settings.store.setString('cloud_lan_token', lanToken);
+                await settings.store.setString('cloud_oauth_client_id', clientId);
+                await settings.store.setString('cloud_oauth_client_secret', clientSecret);
+
+                await cloudSyncService.configureCloud(
+                  lanBaseUrl: lanUrl,
+                  lanApiToken: lanToken,
+                  oauthClientId: clientId,
+                  oauthClientSecret: clientSecret,
+                );
+
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+
+                if (context.mounted) {
+                  showFeedback(context, FeedbackType.info, '正在调起 Google Drive 授权...');
+                }
+
+                final ok = await cloudSyncService.authorizeGoogleDrive(
+                  clientId: clientId,
+                  clientSecret: clientSecret,
+                );
+
+                if (context.mounted) {
+                  showFeedback(
+                    context,
+                    FeedbackType.info,
+                    ok ? 'Google Drive 授权成功，正在同步...' : '授权未完成或已取消',
+                  );
+                }
+                if (ok) {
+                  await cloudSyncService.sync(source);
+                }
+              },
+              child: const Text('授权 Google Drive'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final lanUrl = lanUrlController.text.trim();
+                final lanToken = lanTokenController.text.trim();
+                final clientId = clientIdController.text.trim();
+                final clientSecret = clientSecretController.text.trim();
+
+                await settings.store.setString('cloud_lan_url', lanUrl);
+                await settings.store.setString('cloud_lan_token', lanToken);
+                await settings.store.setString('cloud_oauth_client_id', clientId);
+                await settings.store.setString('cloud_oauth_client_secret', clientSecret);
+
+                await cloudSyncService.configureCloud(
+                  lanBaseUrl: lanUrl,
+                  lanApiToken: lanToken,
+                  oauthClientId: clientId,
+                  oauthClientSecret: clientSecret,
+                );
+
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop();
+                }
+
+                if (context.mounted) {
+                  showFeedback(context, FeedbackType.info, '配置已保存，正在执行同步...');
+                }
+                await cloudSyncService.sync(source);
+              },
+              child: const Text('保存并同步'),
+            ),
+          ],
+        );
+      },
+    );
+  }
 }

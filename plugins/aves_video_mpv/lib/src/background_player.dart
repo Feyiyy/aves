@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:aves_video_mpv/aves_video_mpv.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 
 class BackgroundPlayer {
@@ -39,7 +40,20 @@ class BackgroundPlayer {
       }
     });
 
-    await player.open(Media(uri), play: false);
+    var mediaUri = uri;
+    if (mediaUri.startsWith('cloudgallery://')) {
+      try {
+        const channel = MethodChannel('deckers.thibault/aves/cloud_saf');
+        final proxyUrl = await channel.invokeMethod<String>('getVideoStreamProxyUrl', {'uri': mediaUri});
+        if (proxyUrl != null && proxyUrl.isNotEmpty) {
+          mediaUri = proxyUrl;
+        }
+      } catch (e) {
+        debugPrint('Failed to get video stream proxy URL for $mediaUri: $e');
+      }
+    }
+
+    await player.open(Media(mediaUri), play: false);
 
     final timeoutMillis = mimeType.startsWith('image') ? _probeTimeoutImage : _probeTimeoutVideo;
     await Future.any([videoDecodedCompleter.future, Future.pause(Duration(milliseconds: timeoutMillis))]);

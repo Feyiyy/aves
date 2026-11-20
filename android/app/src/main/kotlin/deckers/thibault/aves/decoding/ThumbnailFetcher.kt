@@ -204,24 +204,7 @@ class ThumbnailFetcher internal constructor(
     }
 
     private suspend fun fetchCloudGalleryThumbnail() {
-        val sha256 = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase()
-        if (sha256.isNullOrEmpty() || sha256.length !in 16..64) {
-            result.error("getThumbnail-cloud", "Invalid cloudgallery URI: $uri", null)
-            return
-        }
-
-        val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase()
-        val thumbKey = if (!thumbParam.isNullOrEmpty() && thumbParam.length in 16..64) thumbParam else sha256
-
-        var localFile: java.io.File? = deckers.thibault.aves.cloud.GoogleDriveSafManager.getLocalThumbIfPresent(context, thumbKey)
-        if (localFile == null && thumbKey != sha256) {
-            localFile = deckers.thibault.aves.cloud.GoogleDriveSafManager.getLocalThumbIfPresent(context, sha256)
-        }
-
-        if (localFile == null) {
-            val treeUri = deckers.thibault.aves.cloud.CloudGalleryHolder.getPersistedTreeUri(context)
-            localFile = deckers.thibault.aves.cloud.GoogleDriveSafManager.fetchForegroundThumbnail(context, treeUri, thumbKey)
-        }
+        val localFile = deckers.thibault.aves.cloud.CloudDriveApiClient.fetchThumbnail(context, uri)
 
         if (localFile != null && localFile.exists() && localFile.length() > 0L) {
             try {
@@ -231,7 +214,6 @@ class ThumbnailFetcher internal constructor(
                         val bytesWithTrailer = ByteArray(fileLen.toInt() + 1)
                         java.io.FileInputStream(localFile).use { it.read(bytesWithTrailer, 0, fileLen.toInt()) }
                         bytesWithTrailer[fileLen.toInt()] = BitmapUtils.FORMAT_BYTE_ENCODED_AS_BYTES[0]
-                        deckers.thibault.aves.cloud.AppLogger.log(context, "[ThumbFetch] Success streamBytes: sha=$sha256 key=$thumbKey bytes=${bytesWithTrailer.size}")
                         result.streamBytes(ByteArrayInputStream(bytesWithTrailer))
                         return
                     }
@@ -240,18 +222,17 @@ class ThumbnailFetcher internal constructor(
                     if (bitmap != null) {
                         val bytes = BitmapUtils.getBytes(bitmap, recycle = false, decoded = true, applyGainmap = false, mimeType = "image/webp")
                         if (bytes != null) {
-                            deckers.thibault.aves.cloud.AppLogger.log(context, "[ThumbFetch] Success decoded bitmap: sha=$sha256 key=$thumbKey")
                             result.streamBytes(ByteArrayInputStream(bytes))
                             return
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.w(LOG_TAG, "Failed to read local cloud thumb $sha256", e)
+                Log.w(LOG_TAG, "Failed to read local cloud thumb: $uri", e)
             }
         }
 
-        result.error("getThumbnail-cloud-waiting", "Cloud thumbnail pending: $sha256", null)
+        result.error("getThumbnail-cloud-waiting", "Cloud thumbnail pending: $uri", null)
     }
 
     companion object {

@@ -28,6 +28,7 @@ import 'package:aves/model/source/collection_lens.dart';
 import 'package:aves/model/source/collection_source.dart';
 import 'package:aves/model/vaults/vaults.dart';
 import 'package:aves/ref/mime_types.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/services/app_service.dart';
 import 'package:aves/services/common/image_op_events.dart';
 import 'package:aves/services/common/services.dart';
@@ -368,6 +369,8 @@ class EntrySetActionDelegate with FeedbackMixin, PermissionAwareMixin, SizeAware
         final successOps = processed.where((op) => op.success).toSet();
         final deletedOps = successOps.where((op) => !op.skipped).toSet();
         final deletedUris = deletedOps.map((op) => op.uri).toSet();
+        final deletedEntries = entries.where((e) => deletedUris.contains(e.uri)).toSet();
+        unawaited(cloudSyncService.trashEntriesOnServer(deletedEntries));
         await source.removeEntries(deletedUris, includeTrash: true);
         source.resumeMonitoring();
 

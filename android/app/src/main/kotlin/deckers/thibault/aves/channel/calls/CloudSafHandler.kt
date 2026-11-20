@@ -2,141 +2,136 @@ package deckers.thibault.aves.channel.calls
 
 import android.app.Activity
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
-import deckers.thibault.aves.MainActivity
-import deckers.thibault.aves.PendingStorageAccessResultHandler
-import deckers.thibault.aves.cloud.CloudGalleryHolder
-import deckers.thibault.aves.cloud.GoogleDriveSafManager
+import deckers.thibault.aves.cloud.CloudDriveApiClient
 import deckers.thibault.aves.utils.LogUtils
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.File
 
 class CloudSafHandler(private val activity: Activity) : MethodCallHandler {
-    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     fun register(messenger: BinaryMessenger) {
         MethodChannel(messenger, CHANNEL).setMethodCallHandler(this)
-        EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(GoogleDriveSafManager)
+        EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(CloudDriveApiClient)
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "getPersistedTreeUri" -> {
-                val uri = CloudGalleryHolder.getPersistedTreeUri(activity)
-                result.success(uri?.toString())
-            }
-
-            "mountGoogleDrive" -> {
-                mountGoogleDrive(result)
-            }
-
-            "syncSnapshot" -> {
-                val treeUri = CloudGalleryHolder.getPersistedTreeUri(activity)
-                if (treeUri == null) {
-                    result.error("not_mounted", "Google Drive TreeUri is not mounted", null)
-                    return
-                }
-                syncSnapshot(treeUri, result)
-            }
-
-            "startThumbPackUnpack", "startUnpack" -> {
-                val treeUriStr = call.argument<String>("treeUri")
-                val treeUri = if (treeUriStr != null) Uri.parse(treeUriStr) else CloudGalleryHolder.getPersistedTreeUri(activity)
-                if (treeUri == null) {
-                    result.error("not_mounted", "Google Drive TreeUri is not mounted", null)
-                    return
-                }
-                val force = call.argument<Boolean>("force") ?: false
-                ioScope.launch {
-                    val ok = GoogleDriveSafManager.untarThumbsPack(activity, treeUri, force = force)
-                    mainScope.launch { result.success(ok) }
-                }
-            }
-
-            "isUnpacking" -> {
-                result.success(GoogleDriveSafManager.isUnpacking())
-            }
-
-            "getStatus" -> {
-                result.success(GoogleDriveSafManager.getStatusMap())
-            }
-
-            "setRateLimitKbps" -> {
-                val kbps = call.argument<Number>("rateLimitKbps")?.toLong() ?: 512L
-                GoogleDriveSafManager.setRateLimitBytesPerSec(kbps * 1024L)
+            "configureCloud" -> {
+                val lanBaseUrl = call.argument<String>("lanBaseUrl")
+                val lanApiToken = call.argument<String>("lanApiToken")
+                val oauthClientId = call.argument<String>("oauthClientId")
+                val oauthClientSecret = call.argument<String>("oauthClientSecret")
+                val driveRootFolderName = call.argument<String>("driveRootFolderName")
+                val driveRootFolderId = call.argument<String>("driveRootFolderId")
+                CloudDriveApiClient.configure(
+                    activity,
+                    lanBaseUrl = lanBaseUrl,
+                    lanApiToken = lanApiToken,
+                    oauthClientId = oauthClientId,
+                    oauthClientSecret = oauthClientSecret,
+                    driveRootFolderName = driveRootFolderName,
+                    driveRootFolderId = driveRootFolderId,
+                )
                 result.success(true)
             }
 
-            else -> result.notImplemented()
-        }
-    }
-
-    private fun mountGoogleDrive(result: MethodChannel.Result) {
-        val initialUri = CloudGalleryHolder.getPersistedTreeUri(activity)
-        val intent = GoogleDriveSafManager.createOpenTreeIntent(initialUri)
-
-        if (intent.resolveActivity(activity.packageManager) == null) {
-            result.error("no_activity", "No activity found to handle ACTION_OPEN_DOCUMENT_TREE", null)
-            return
-        }
-
-        MainActivity.pendingStorageAccessResultHandlers[MainActivity.DOCUMENT_TREE_ACCESS_REQUEST] =
-            PendingStorageAccessResultHandler(
-                path = null,
-                onGranted = { treeUri ->
-                    Log.i(LOG_TAG, "Google Drive tree granted: $treeUri")
-                    CloudGalleryHolder.setPersistedTreeUri(activity, treeUri)
-                    syncSnapshot(treeUri, result)
-                },
-                onDenied = {
-                    Log.w(LOG_TAG, "Google Drive tree selection cancelled by user")
-                    result.error("cancelled", "User cancelled folder selection", null)
-                }
-            )
-
-        activity.startActivityForResult(intent, MainActivity.DOCUMENT_TREE_ACCESS_REQUEST)
-    }
-
-    private fun syncSnapshot(treeUri: Uri, result: MethodChannel.Result) {
-        ioScope.launch {
-            try {
-                Log.i(LOG_TAG, "Starting master snapshot sync from Google Drive SAF: $treeUri")
-                val snapshotFile = GoogleDriveSafManager.syncMasterSnapshot(activity, treeUri)
-                Log.i(LOG_TAG, "Snapshot successfully downloaded to: ${snapshotFile.absolutePath} (size: ${snapshotFile.length()})")
-
-                // 立即后台异步启动 thumbs_pack.tar 双轨流式解包与热索引
-                ioScope.launch {
-                    try {
-                        Log.i(LOG_TAG, "Starting background stream untar for thumbs_pack.tar...")
-                        GoogleDriveSafManager.untarThumbsPack(activity, treeUri)
-                    } catch (t: Throwable) {
-                        Log.w(LOG_TAG, "Background untar error", t)
-                    }
-                }
-
-                mainScope.launch {
-                    result.success(
-                        mapOf(
-                            "treeUri" to treeUri.toString(),
-                            "snapshotPath" to snapshotFile.absolutePath,
-                            "snapshotSize" to snapshotFile.length(),
-                        )
+            "authorizeGoogleDrive" -> {
+                val clientId = call.argument<String>("clientId")
+                val clientSecret = call.argument<String>("clientSecret")
+                CloudDriveApiClient.ioScope.launch {
+                    val ok = CloudDriveApiClient.authorizeGoogleDrive(
+                        activity,
+                        clientId = clientId,
+                        clientSecret = clientSecret,
                     )
-                }
-            } catch (t: Throwable) {
-                Log.e(LOG_TAG, "Failed to sync snapshot from SAF: $treeUri", t)
-                mainScope.launch {
-                    result.error("sync_failed", t.message, null)
+                    mainHandler.post { result.success(ok) }
                 }
             }
+
+            "clearDriveAuth" -> {
+                CloudDriveApiClient.clearDriveAuth(activity)
+                result.success(true)
+            }
+
+            "syncMasterSnapshot" -> {
+                val localVer = (call.argument<Number>("localSnapshotVersion") ?: 0L).toLong()
+                CloudDriveApiClient.ioScope.launch {
+                    try {
+                        val syncRes = CloudDriveApiClient.syncMasterSnapshot(activity, localVer)
+                        mainHandler.post {
+                            if (syncRes != null) {
+                                result.success(
+                                    mapOf(
+                                        "snapshotPath" to syncRes.snapshotFile.absolutePath,
+                                        "snapshotVersion" to syncRes.snapshotVersion,
+                                        "channel" to syncRes.channel,
+                                    )
+                                )
+                            } else {
+                                result.error("sync_failed", "Snapshot sync failed or no access token", null)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(LOG_TAG, "syncMasterSnapshot failed", e)
+                        mainHandler.post { result.error("sync_failed", e.message, null) }
+                    }
+                }
+            }
+
+            "getVideoStreamProxyUrl" -> {
+                val uriStr = call.argument<String>("uri")
+                if (uriStr.isNullOrEmpty()) {
+                    result.success(null)
+                    return
+                }
+                val proxyUrl = CloudDriveApiClient.getVideoStreamProxyUrl(activity, Uri.parse(uriStr))
+                result.success(proxyUrl)
+            }
+
+            "submitOutboxOps" -> {
+                val opsJson = call.argument<String>("opsJson").orEmpty()
+                CloudDriveApiClient.ioScope.launch {
+                    val ok = CloudDriveApiClient.submitOutboxOps(activity, opsJson)
+                    mainHandler.post { result.success(ok) }
+                }
+            }
+
+            "uploadBackupFile" -> {
+                val localPath = call.argument<String>("localPath").orEmpty()
+                val remoteRelPath = call.argument<String>("remoteRelPath").orEmpty()
+                val mimeType = call.argument<String>("mimeType") ?: "application/octet-stream"
+                val file = File(localPath)
+                if (!file.isFile) {
+                    result.success(false)
+                    return
+                }
+                CloudDriveApiClient.ioScope.launch {
+                    val ok = CloudDriveApiClient.uploadBackupFile(activity, file, remoteRelPath, mimeType)
+                    mainHandler.post { result.success(ok) }
+                }
+            }
+
+            "getStatus" -> {
+                result.success(CloudDriveApiClient.getStatusMap(activity))
+            }
+
+            "getPersistedTreeUri" -> result.success(null)
+            "mountGoogleDrive" -> result.error("saf_deprecated", "Google Drive SAF is replaced by REST API v3 in v3.0", null)
+            "syncSnapshot" -> result.error("saf_deprecated", "Use syncMasterSnapshot instead", null)
+            "startThumbPackUnpack", "startUnpack" -> result.success(true)
+            "isUnpacking" -> result.success(false)
+            "setRateLimitKbps" -> result.success(true)
+
+            else -> result.notImplemented()
         }
     }
 

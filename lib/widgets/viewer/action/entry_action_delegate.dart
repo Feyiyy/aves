@@ -14,6 +14,7 @@ import 'package:aves/model/settings/settings.dart';
 import 'package:aves/model/source/collection_lens.dart';
 import 'package:aves/model/source/collection_source.dart';
 import 'package:aves/model/vaults/vaults.dart';
+import 'package:aves/services/cloud_sync_service.dart';
 import 'package:aves/services/common/services.dart';
 import 'package:aves/services/media/media_edit_service.dart';
 import 'package:aves/theme/durations.dart';
@@ -445,6 +446,7 @@ class EntryActionDelegate with FeedbackMixin, PermissionAwareMixin, SizeAwareMix
       showFeedback(context, FeedbackType.warn, l10n.genericFailureFeedback);
     } else {
       final source = context.read<CollectionSource>();
+      unawaited(cloudSyncService.trashEntriesOnServer({targetEntry}));
       await source.removeEntries({targetEntry.uri}, includeTrash: true);
       EntryDeletedNotification({targetEntry}).dispatch(context);
     }

@@ -8,6 +8,7 @@ import 'package:aves_video_mpv/aves_video_mpv.dart';
 import 'package:aves_video_mpv/src/tracks.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -208,8 +209,21 @@ class MpvVideoController(
     // and switching from a supported file to an unsupported file crashes:
     // cf https://github.com/media-kit/media-kit/issues/1061
 
+    var mediaUri = entry.uri;
+    if (mediaUri.startsWith('cloudgallery://')) {
+      try {
+        const channel = MethodChannel('deckers.thibault/aves/cloud_saf');
+        final proxyUrl = await channel.invokeMethod<String>('getVideoStreamProxyUrl', {'uri': mediaUri});
+        if (proxyUrl != null && proxyUrl.isNotEmpty) {
+          mediaUri = proxyUrl;
+        }
+      } catch (e) {
+        debugPrint('Failed to get video stream proxy URL for $mediaUri: $e');
+      }
+    }
+
     await _applyLoop();
-    await _mkPlayer.open(Media(entry.uri), play: playing);
+    await _mkPlayer.open(Media(mediaUri), play: playing);
     await _mkPlayer.setSubtitleTrack(SubtitleTrack.no());
     if (startMillis > 0) {
       await seekTo(startMillis);

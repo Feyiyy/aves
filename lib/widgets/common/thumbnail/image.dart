@@ -88,7 +88,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     if (widget.entry.uri.startsWith('cloudgallery://')) {
       final uri = Uri.tryParse(widget.entry.uri);
       final sha256 = (uri?.host ?? '').toLowerCase();
-      if (sha256.length == 64) {
+      if (sha256.length >= 16) {
         _cloudRevisionNotifier = cloudSyncService.revisionNotifierFor(sha256);
         _cloudRevisionNotifier?.addListener(_onVisualChanged);
       }
