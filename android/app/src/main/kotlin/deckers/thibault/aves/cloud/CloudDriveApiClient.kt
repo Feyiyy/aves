@@ -50,7 +50,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * 1. 动态双通道选路：450ms 探测局域网 PC Daemon，不可达自动无缝降级 Google Drive REST API v3；
  * 2. OAuth 2.0 + PKCE (127.0.0.1 本地回环，兼容 Desktop Client + Personal 免审核长期授权) + Single-Flight 刷新锁；
- * 3. 不可变分卷 (packs/*.pack) HTTP Range 精准拉取单张 20KB WebP 缩略图，彻底告别 SAF 与 thumbs_pack.tar；
+ * 3. 不可变分卷 (packs pack_id.pack) HTTP Range 精准拉取单张 20KB WebP 缩略图，彻底告别 SAF 与 thumbs_pack.tar；
  * 4. 原图 Single-Flight 并发合并下载 + 1.5GB LRU 本地缓存 + original_ready 事件推流；
  * 5. 内置本地 HTTP 206 流式回环代理 (127.0.0.1)，让 mpv 在家/出门均可流式播放 4K 视频与拖拽进度条；
  * 6. Outbox 投递与流式上传（LAN 固定长度流式 / Drive Resumable，4K 视频恒定 64KB 内存）。

@@ -40,7 +40,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import deckers.thibault.aves.cloud.AppLogger
 import deckers.thibault.aves.cloud.CloudDriveApiClient
 
 object StorageUtils {
@@ -592,7 +591,7 @@ object StorageUtils {
             // 1. 本地已有原图缓存，直接返回本地文件 URI
             val localOriginal = CloudDriveApiClient.getLocalOriginalIfPresent(context, itemId)
             if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
-                AppLogger.log(context, "[Glide] Hit Local Original: $itemId (${localOriginal.length()} bytes)")
+                Log.d(LOG_TAG, "[Glide] Hit Local Original: $itemId (${localOriginal.length()} bytes)")
                 return Uri.fromFile(localOriginal)
             }
 
@@ -610,7 +609,7 @@ object StorageUtils {
                 localThumb = runBlocking { CloudDriveApiClient.fetchThumbnail(context, uri) }
             }
             if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
-                AppLogger.log(context, "[Glide] Hit Local Thumb: thumb=$thumbKey, bg fetch original")
+                Log.d(LOG_TAG, "[Glide] Hit Local Thumb: thumb=$thumbKey, bg fetch original")
                 return Uri.fromFile(localThumb)
             }
 
@@ -671,7 +670,7 @@ object StorageUtils {
                 // 1. 本地已有原图缓存，直接返回输入流
                 val localOriginal = CloudDriveApiClient.getLocalOriginalIfPresent(context, itemId)
                 if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
-                    AppLogger.log(context, "[Stream] Stage 1 Hit High-Res Original: itemId=$itemId size=${localOriginal.length()}")
+                    Log.d(LOG_TAG, "[Stream] Stage 1 Hit High-Res Original: itemId=$itemId size=${localOriginal.length()}")
                     return localOriginal.inputStream()
                 }
 
@@ -689,11 +688,11 @@ object StorageUtils {
                     localThumb = runBlocking { CloudDriveApiClient.fetchThumbnail(context, uri) }
                 }
                 if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
-                    AppLogger.log(context, "[Stream] Stage 2 Hit Local Thumb: thumb=$thumbKey")
+                    Log.d(LOG_TAG, "[Stream] Stage 2 Hit Local Thumb: thumb=$thumbKey")
                     return localThumb.inputStream()
                 }
 
-                AppLogger.log(context, "[Stream] Fallback null: itemId=$itemId")
+                Log.d(LOG_TAG, "[Stream] Fallback null: itemId=$itemId")
                 null
             } else if (uri.isFileScheme) {
                 FileInputStream(uri.path)
