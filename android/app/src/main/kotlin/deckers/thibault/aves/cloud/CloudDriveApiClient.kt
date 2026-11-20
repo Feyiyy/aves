@@ -777,7 +777,13 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         val relPath = uri.getQueryParameter("rel")?.trim().orEmpty()
         if (itemId.isEmpty() || relPath.isEmpty()) return@withContext null
 
-        getLocalOriginalIfPresent(context, itemId)?.let { return@withContext it }
+        getLocalOriginalIfPresent(context, itemId)?.let {
+            Log.i("CloudDebug", "[Orig] cache hit itemId=$itemId size=${it.length()} rel=$relPath")
+            return@withContext it
+        }
+
+        val lanAvailable = isLanAvailable(context)
+        Log.i("CloudDebug", "[Orig] start rel=$relPath lan=$lanAvailable itemId=$itemId")
 
         val future = CompletableFuture<File?>()
         val existing = inFlightOriginals.putIfAbsent(itemId, future)
@@ -787,24 +793,30 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         try {
             val target = File(getOriginalRootDir(context), itemId)
             var ok = false
-            if (isLanAvailable(context)) {
-                ok = downloadLanToFile(context, "${getLanBaseUrl(context)}/api/original?path=${urlEncode(relPath)}", target, null)
+            if (lanAvailable) {
+                val lanUrl = "${getLanBaseUrl(context)}/api/original?path=${urlEncode(relPath)}"
+                ok = downloadLanToFile(context, lanUrl, target, null)
+                Log.i("CloudDebug", "[Orig] LAN download finished ok=$ok targetLen=${if (target.exists()) target.length() else -1}")
             }
             if (!ok) {
                 val token = getValidAccessToken(context)
                 if (token != null) {
                     ok = downloadDrivePathWithRetry(context, relPath, target, token, null)
+                    Log.i("CloudDebug", "[Orig] Drive download finished ok=$ok targetLen=${if (target.exists()) target.length() else -1}")
                 }
             }
             if (ok && target.isFile && target.length() > 0L) {
                 result = target
+                Log.i("CloudDebug", "[Orig] success rel=$relPath bytes=${target.length()}")
                 notifyOriginalReady(itemId)
                 evictOriginalCacheIfNeeded(context)
+            } else {
+                Log.w("CloudDebug", "[Orig] failed to retrieve rel=$relPath targetExists=${target.exists()}")
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "fetchOriginal failed ($relPath): ${e.message}")
+            Log.e("CloudDebug", "[Orig] exception ($relPath): ${e.message}", e)
         } finally {
             future.complete(result)
             inFlightOriginals.remove(itemId, future)
@@ -1206,9 +1218,15 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
             return false
         }
         return try {
-            if (conn.responseCode !in 200..299) false
-            else conn.inputStream.use { writeStreamAtomically(it, target) }
-        } catch (_: Exception) {
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                Log.w("CloudDebug", "[Orig] LAN HTTP $code for $url")
+                false
+            } else {
+                conn.inputStream.use { writeStreamAtomically(it, target) }
+            }
+        } catch (e: Exception) {
+            Log.w("CloudDebug", "[Orig] LAN download exception: ${e.message}")
             invalidateLanProbe()
             false
         } finally {

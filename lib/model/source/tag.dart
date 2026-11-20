@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/entry/extensions/catalog.dart';
+import 'package:aves/model/entry/origins.dart';
 import 'package:aves/model/filters/container/tag_group.dart';
 import 'package:aves/model/filters/covered/tag.dart';
 import 'package:aves/model/metadata/catalog.dart';
@@ -31,12 +32,13 @@ mixin TagMixin on SourceBase {
     onCatalogMetadataChanged();
   }
 
-  static bool catalogEntriesTest(AvesEntry entry) => !entry.isCatalogued;
+  static bool catalogEntriesTest(AvesEntry entry) => entry.origin != EntryOrigins.cloud && !entry.isCatalogued;
 
   // returns whether some entries got processed
   Future<bool> catalogEntries(AnalysisController controller, Set<AvesEntry> candidateEntries) async {
     if (controller.isStopping) return false;
 
+    candidateEntries = candidateEntries.where((entry) => entry.origin != EntryOrigins.cloud).toSet();
     final force = controller.force;
     if (!force) {
       candidateEntries = candidateEntries.where(catalogEntriesTest).toSet();

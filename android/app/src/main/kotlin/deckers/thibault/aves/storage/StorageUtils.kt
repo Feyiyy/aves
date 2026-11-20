@@ -584,39 +584,12 @@ object StorageUtils {
         val uri = contentAddress.uri
 
         if (uri.scheme == "cloudgallery") {
-            val itemId = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase().orEmpty()
-            val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase().orEmpty()
-            val thumbKey = if (thumbParam.isNotEmpty()) thumbParam.removeSuffix(".webp") else itemId
-
-            // 1. 本地已有原图缓存，直接返回本地文件 URI
-            val localOriginal = CloudDriveApiClient.getLocalOriginalIfPresent(context, itemId)
-            if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
-                Log.d(LOG_TAG, "[Glide] Hit Local Original: $itemId (${localOriginal.length()} bytes)")
-                return Uri.fromFile(localOriginal)
-            }
-
-            // 2. 未命中原图：启动后台异步拉取真实原图（就绪后通过 EventChannel 推送 original_ready）
-            CloudDriveApiClient.ioScope.launch {
-                CloudDriveApiClient.fetchOriginal(context, uri)
-            }
-
-            // 3. 立刻返回本地缩略图（若无则 runBlocking 快速拉取），消除黑屏
-            var localThumb = CloudDriveApiClient.getLocalThumbIfPresent(context, thumbKey)
-            if (localThumb == null && thumbKey != itemId) {
-                localThumb = CloudDriveApiClient.getLocalThumbIfPresent(context, itemId)
-            }
-            if (localThumb == null) {
-                localThumb = runBlocking { CloudDriveApiClient.fetchThumbnail(context, uri) }
-            }
-            if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
-                Log.d(LOG_TAG, "[Glide] Hit Local Thumb: thumb=$thumbKey, bg fetch original")
-                return Uri.fromFile(localThumb)
-            }
-
-            // 4. 原图和缩略图均未落盘，通过 openInputStream 创建临时文件
-            return try {
-                Uri.fromFile(createTempFile(context, uri, sizeBytes))
-            } catch (_: Exception) {
+            val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
+            return if (original != null && original.exists() && original.length() > 0L) {
+                Log.d(LOG_TAG, "[Glide] Hit Real Original: $uri (${original.length()} bytes)")
+                Uri.fromFile(original)
+            } else {
+                Log.w("CloudDebug", "getGlideSafeUri fetchOriginal failed: $uri")
                 uri
             }
         }
@@ -663,37 +636,14 @@ object StorageUtils {
         val safeUri = getSafeInputUri(context, uri)
         return try {
             return if (uri.scheme == "cloudgallery") {
-                val itemId = (uri.host ?: uri.authority ?: uri.pathSegments.firstOrNull())?.trim()?.lowercase().orEmpty()
-                val thumbParam = uri.getQueryParameter("thumb")?.trim()?.lowercase().orEmpty()
-                val thumbKey = if (thumbParam.isNotEmpty()) thumbParam.removeSuffix(".webp") else itemId
-
-                // 1. 本地已有原图缓存，直接返回输入流
-                val localOriginal = CloudDriveApiClient.getLocalOriginalIfPresent(context, itemId)
-                if (localOriginal != null && localOriginal.exists() && localOriginal.length() > 0L) {
-                    Log.d(LOG_TAG, "[Stream] Stage 1 Hit High-Res Original: itemId=$itemId size=${localOriginal.length()}")
-                    return localOriginal.inputStream()
+                val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
+                if (original != null && original.exists() && original.length() > 0L) {
+                    Log.d(LOG_TAG, "[Stream] Hit Real Original: $uri (${original.length()} bytes)")
+                    original.inputStream()
+                } else {
+                    Log.w("CloudDebug", "fetchOriginal failed: $uri")
+                    null
                 }
-
-                // 2. 未命中原图：启动后台异步拉取真实原图
-                CloudDriveApiClient.ioScope.launch {
-                    CloudDriveApiClient.fetchOriginal(context, uri)
-                }
-
-                // 3. 降级返回本地缩略图消除黑屏
-                var localThumb = CloudDriveApiClient.getLocalThumbIfPresent(context, thumbKey)
-                if (localThumb == null && thumbKey != itemId) {
-                    localThumb = CloudDriveApiClient.getLocalThumbIfPresent(context, itemId)
-                }
-                if (localThumb == null) {
-                    localThumb = runBlocking { CloudDriveApiClient.fetchThumbnail(context, uri) }
-                }
-                if (localThumb != null && localThumb.exists() && localThumb.length() > 0L) {
-                    Log.d(LOG_TAG, "[Stream] Stage 2 Hit Local Thumb: thumb=$thumbKey")
-                    return localThumb.inputStream()
-                }
-
-                Log.d(LOG_TAG, "[Stream] Fallback null: itemId=$itemId")
-                null
             } else if (uri.isFileScheme) {
                 FileInputStream(uri.path)
             } else if (uri.isDataScheme) {

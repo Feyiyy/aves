@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:aves/model/entry/entry.dart';
 import 'package:aves/model/entry/origins.dart';
+import 'package:aves/model/metadata/catalog.dart';
 import 'package:aves/model/settings/settings.dart';
 import 'package:aves/model/source/collection_source.dart';
 import 'package:aves/services/common/services.dart';
@@ -284,6 +285,13 @@ class CloudSyncService {
         }
       }
 
+      // 一次性元数据迁移：重置旧的已同步云端条目的宽高并对齐 snapshot 的真实数据
+      final migratedCatalog = settings.store.getBool('cloud_metadata_v4_migrated') ?? false;
+      if (!migratedCatalog) {
+        await settings.store.remove('cloud_snapshot_version');
+        await settings.store.setBool('cloud_metadata_v4_migrated', true);
+      }
+
       final localSnapshotVersion = settings.store.getInt('cloud_snapshot_version') ?? 0;
       debugPrint('CloudSyncService: invoking syncMasterSnapshot (localVer: $localSnapshotVersion)...');
 
@@ -320,15 +328,15 @@ class CloudSyncService {
   Future<void> _loadSnapshotDatabase(File dbFile, CollectionSource source) async {
     final db = await openReadOnlyDatabase(dbFile.path);
 
-    // 检查是否有分卷列，若无则容错查询
+    // 检查是否有分卷列与坐标列，若无则容错查询
     List<Map<String, Object?>> rows;
     try {
       rows = await db.rawQuery(
-        'SELECT id, relative_path, file_name, mime_type, file_size, width, height, duration_ms, taken_at_ms, modified_at_ms, thumb_rel_path, pack_id, pack_offset, pack_length FROM media_items WHERE COALESCE(is_deleted, 0) = 0',
+        'SELECT id, relative_path, file_name, mime_type, file_size, width, height, duration_ms, taken_at_ms, modified_at_ms, latitude, longitude, thumb_rel_path, pack_id, pack_offset, pack_length FROM media_items WHERE COALESCE(is_deleted, 0) = 0',
       );
     } catch (_) {
       rows = await db.rawQuery(
-        'SELECT id, relative_path, file_name, mime_type, file_size, width, height, duration_ms, taken_at_ms, modified_at_ms, thumb_rel_path, NULL as pack_id, NULL as pack_offset, NULL as pack_length FROM media_items WHERE COALESCE(is_deleted, 0) = 0',
+        'SELECT id, relative_path, file_name, mime_type, file_size, width, height, duration_ms, taken_at_ms, modified_at_ms, NULL as latitude, NULL as longitude, thumb_rel_path, NULL as pack_id, NULL as pack_offset, NULL as pack_length FROM media_items WHERE COALESCE(is_deleted, 0) = 0',
       );
     }
 
@@ -376,6 +384,9 @@ class CloudSyncService {
     };
 
     final cloudEntries = <AvesEntry>{};
+    final cloudEntriesToUpdate = <AvesEntry>{};
+    final cloudCatalogMetadata = <CatalogMetadata>{};
+
     for (final row in rows) {
       final sha256 = row['id'] as String? ?? '';
       if (sha256.isEmpty) continue;
@@ -389,6 +400,8 @@ class CloudSyncService {
       final durationMs = (row['duration_ms'] as num?)?.toInt() ?? 0;
       final takenAtMs = (row['taken_at_ms'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch;
       final modifiedAtMs = (row['modified_at_ms'] as num?)?.toInt() ?? takenAtMs;
+      final lat = (row['latitude'] as num?)?.toDouble();
+      final lng = (row['longitude'] as num?)?.toDouble();
       final thumbRelPath = (row['thumb_rel_path'] as String?) ?? '';
       final thumbName = thumbRelPath.isNotEmpty ? thumbRelPath.split('/').last : '$sha256.webp';
       final thumbHash = thumbName.replaceAll('.webp', '');
@@ -415,19 +428,42 @@ class CloudSyncService {
       final uri = Uri(scheme: 'cloudgallery', host: sha256, queryParameters: queryParams).toString();
       final displayPath = '/云端相册/$relPath';
 
+      // 视频保底尺寸 1920x1080，解除 Aves 播放器 isEmpty 拦截
+      final isVideo = mimeType.startsWith('video/');
+      final effectiveWidth = (width > 0) ? width : (isVideo ? 1920 : 0);
+      final effectiveHeight = (height > 0) ? height : (isVideo ? 1080 : 0);
+
+      // 构造精确的 CatalogMetadata，直接对齐原图拍摄日期与真实 GPS 经纬度
+      final catalog = CatalogMetadata(
+        id: entryId,
+        dateMillis: takenAtMs,
+        latitude: lat,
+        longitude: lng,
+      );
+
       final existingEntry = existingByUri[uri];
       if (existingEntry != null) {
         _entryBySha256[sha256.toLowerCase()] = existingEntry;
         if (thumbHash.isNotEmpty && thumbHash != sha256) {
           _entryBySha256[thumbHash.toLowerCase()] = existingEntry;
         }
+        // 同步刷新此前可能被旧缩略图污染的宽高与 catalog
+        var changed = false;
+        if (effectiveWidth > 0 && effectiveHeight > 0 && (existingEntry.width != effectiveWidth || existingEntry.height != effectiveHeight)) {
+          existingEntry.width = effectiveWidth;
+          existingEntry.height = effectiveHeight;
+          changed = true;
+        }
+        if (existingEntry.catalogMetadata?.latitude != lat || existingEntry.catalogMetadata?.longitude != lng || existingEntry.catalogMetadata?.dateMillis != takenAtMs) {
+          existingEntry.catalogMetadata = catalog;
+          cloudCatalogMetadata.add(catalog);
+          changed = true;
+        }
+        if (changed) {
+          cloudEntriesToUpdate.add(existingEntry);
+        }
         continue;
       }
-
-      // 视频保底尺寸 1920x1080，解除 Aves 播放器 isEmpty 拦截
-      final isVideo = mimeType.startsWith('video/');
-      final effectiveWidth = (width > 0) ? width : (isVideo ? 1920 : 0);
-      final effectiveHeight = (height > 0) ? height : (isVideo ? 1080 : 0);
 
       final entry = AvesEntry(
         id: entryId,
@@ -448,11 +484,24 @@ class CloudSyncService {
         trashed: false,
         origin: EntryOrigins.cloud,
       );
+      entry.catalogMetadata = catalog;
+      cloudCatalogMetadata.add(catalog);
       cloudEntries.add(entry);
       _entryBySha256[sha256.toLowerCase()] = entry;
       if (thumbHash.isNotEmpty && thumbHash != sha256) {
         _entryBySha256[thumbHash.toLowerCase()] = entry;
       }
+    }
+
+    if (cloudCatalogMetadata.isNotEmpty) {
+      await localMediaDb.saveCatalogMetadata(cloudCatalogMetadata);
+    }
+
+    if (cloudEntriesToUpdate.isNotEmpty) {
+      for (final e in cloudEntriesToUpdate) {
+        await localMediaDb.updateEntry(e.id, e);
+      }
+      debugPrint('CloudSyncService: updated ${cloudEntriesToUpdate.length} existing entries with latest metadata');
     }
 
     if (cloudEntries.isNotEmpty) {

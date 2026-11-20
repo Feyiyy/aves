@@ -561,7 +561,9 @@ abstract class CollectionSource with SourceBase, AlbumMixin, CountryMixin, Place
 
   Future<void> analyze(AnalysisController? analysisController, {Set<AvesEntry>? entries}) async {
     // not only visible entries, as hidden and vault items may be analyzed
-    final todoEntries = entries ?? allEntries;
+    // 豁免云端条目：禁止后台分析服务全量拉流扫 EXIF，其元数据由快照直接填充
+    final allTodo = entries ?? allEntries;
+    final todoEntries = allTodo.where((entry) => entry.origin != EntryOrigins.cloud).toSet();
     final defaultAnalysisController = AnalysisController();
     final _analysisController = analysisController ?? defaultAnalysisController;
     final force = _analysisController.force;

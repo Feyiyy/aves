@@ -102,10 +102,15 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
 
     private fun streamOriginalBytesWithTrailer(contentAddress: ContentAddress) {
         try {
-            val sent = StorageUtils.openInputStream(context, contentAddress.uri)?.use(::streamBytes)
-            if (sent ?: false) {
-                success(BitmapUtils.FORMAT_BYTE_ENCODED_AS_BYTES)
+            val stream = StorageUtils.openInputStream(context, contentAddress.uri)
+            if (stream != null) {
+                val sent = stream.use(::streamBytes)
+                if (sent) {
+                    success(BitmapUtils.FORMAT_BYTE_ENCODED_AS_BYTES)
+                    return
+                }
             }
+            error("streamImage-image-read-failed", "failed to open stream for $contentAddress", null)
         } catch (e: Exception) {
             error("streamImage-image-read-exception", "failed to get image for $contentAddress", e.stackTraceToString())
         }
