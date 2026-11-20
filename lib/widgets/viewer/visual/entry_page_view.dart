@@ -170,6 +170,7 @@ class _EntryPageViewState extends State<EntryPageView> with TickerProviderStateM
         errorBuilder: (context, error, stackTrace) => ErrorView(
           entry: entry,
           onTap: _onTap,
+          error: error,
         ),
       ),
     );
@@ -186,6 +187,7 @@ class _EntryPageViewState extends State<EntryPageView> with TickerProviderStateM
         errorBuilder: (context, error, stackTrace) => ErrorView(
           entry: entry,
           onTap: _onTap,
+          error: error,
         ),
       ),
     );

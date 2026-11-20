@@ -99,6 +99,17 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
     private val packFileIdCache = ConcurrentHashMap<String, String>()
     private val inFlightThumbs = ConcurrentHashMap<String, CompletableFuture<File?>>()
     private val inFlightOriginals = ConcurrentHashMap<String, CompletableFuture<File?>>()
+    private val lastOriginalErrors = ConcurrentHashMap<String, String>()
+
+    fun getLastOriginalError(itemId: String): String? =
+        lastOriginalErrors[itemId.lowercase().trim()]
+
+    fun setLastOriginalError(itemId: String, error: String) {
+        val clean = itemId.lowercase().trim()
+        lastOriginalErrors[clean] = error
+        Log.e("CloudDebug", "[OrigError] itemId=$clean error=$error")
+    }
+
     private val proxyServer = LocalMediaProxyServer()
 
     data class SnapshotSyncResult(
@@ -448,24 +459,27 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
 
         // 优先通过唯一的 .cloudgallery 反查其父目录
         val qCloud = "name = '$CLOUD_DIR' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val cloudObj = driveApiGetJson(context, token, "$DRIVE_API_BASE/files?q=${urlEncode(qCloud)}&fields=${urlEncode("files(id,parents)")}&pageSize=5")
-            ?.optJSONArray("files")?.optJSONObject(0)
+        val cloudUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qCloud)}&fields=${urlEncode("files(id,parents)")}&pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val cloudObj = driveApiGetJson(context, token, cloudUrl)?.optJSONArray("files")?.optJSONObject(0)
         val cloudId = cloudObj?.optString("id").orEmpty()
         val parentId = cloudObj?.optJSONArray("parents")?.optString(0).orEmpty()
         if (cloudId.isNotBlank() && parentId.isNotBlank()) {
             sp.edit().putString(KEY_DRIVE_ROOT_ID, parentId).apply()
             pathToFileIdCache[CLOUD_DIR] = cloudId
+            Log.i("CloudDebug", "[DriveRoot] found via .cloudgallery: parentId=$parentId cloudId=$cloudId")
             return parentId
         }
 
         val rootName = sp.getString(KEY_DRIVE_ROOT_NAME, "图片")?.trim().orEmpty().ifEmpty { "图片" }
         val qRoot = "name = '${escapeQ(rootName)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val rootId = driveApiGetJson(context, token, "$DRIVE_API_BASE/files?q=${urlEncode(qRoot)}&fields=${urlEncode("files(id)")}&pageSize=2")
-            ?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
+        val rootUrl = "$DRIVE_API_BASE/files?q=${urlEncode(qRoot)}&fields=${urlEncode("files(id)")}&pageSize=2&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val rootId = driveApiGetJson(context, token, rootUrl)?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
+        Log.i("CloudDebug", "[DriveRoot] resolved rootName='$rootName' -> rootId=$rootId")
         if (!rootId.isNullOrBlank()) {
             sp.edit().putString(KEY_DRIVE_ROOT_ID, rootId).apply()
             return rootId
         }
+        Log.w("CloudDebug", "[DriveRoot] failed to resolve rootId on Google Drive!")
         return null
     }
 
@@ -475,7 +489,16 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         token: String,
         bypassCache: Boolean = false,
     ): String? {
-        val clean = relativePath.trim().replace('\\', '/').trimStart('/')
+        var clean = relativePath.trim().replace('\\', '/').trimStart('/')
+        while (clean.contains("%2F", ignoreCase = true) || clean.contains("%2f") || clean.contains("%20")) {
+            val decoded = try {
+                java.net.URLDecoder.decode(clean, "UTF-8")
+            } catch (_: Exception) {
+                break
+            }
+            if (decoded == clean) break
+            clean = decoded
+        }
         if (clean.isEmpty()) return null
         if (!bypassCache) pathToFileIdCache[clean]?.let { return it }
 
@@ -491,9 +514,13 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
             }
             val mimeFilter = if (i == segments.lastIndex) "" else " and mimeType = 'application/vnd.google-apps.folder'"
             val q = "'$parentId' in parents and name = '${escapeQ(seg)}'$mimeFilter and trashed = false"
-            val id = driveApiGetJson(context, token, "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id)")}&pageSize=2")
-                ?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
-            if (id.isNullOrBlank()) return null
+            val queryUrl = "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id)")}&pageSize=2&supportsAllDrives=true&includeItemsFromAllDrives=true"
+            val id = driveApiGetJson(context, token, queryUrl)?.optJSONArray("files")?.optJSONObject(0)?.optString("id")
+            Log.i("CloudDebug", "[DrivePath] parentId=$parentId seg='$seg' -> fileId=$id")
+            if (id.isNullOrBlank()) {
+                Log.w("CloudDebug", "[DrivePath] segment '$seg' not found under parentId=$parentId")
+                return null
+            }
             pathToFileIdCache[subKey] = id
             parentId = id
         }
@@ -509,8 +536,8 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         if (!bypassCache) packFileIdCache[packId]?.let { return it }
         val packsDirId = resolveDriveFileIdByPath(context, "$CLOUD_DIR/$PACKS_DIR", token) ?: return null
         val q = "'$packsDirId' in parents and trashed = false"
-        val arr = driveApiGetJson(context, token, "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id,name)")}&pageSize=200")
-            ?.optJSONArray("files") ?: return null
+        val url = "$DRIVE_API_BASE/files?q=${urlEncode(q)}&fields=${urlEncode("files(id,name)")}&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true"
+        val arr = driveApiGetJson(context, token, url)?.optJSONArray("files") ?: return null
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
             val name = obj.optString("name")
@@ -762,14 +789,37 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         target: File,
         token: String,
         rangeHeader: String?,
+        itemId: String = "",
     ): Boolean {
-        val fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false) ?: return false
+        val rootId = resolveDriveRootFolderId(context, token)
+        if (rootId == null) {
+            val rootName = prefs(context).getString(KEY_DRIVE_ROOT_NAME, "图片")?.trim().orEmpty().ifEmpty { "图片" }
+            if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive未找到图库根目录 (rootName='$rootName')")
+            return false
+        }
+
+        val fileId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = false)
+        if (fileId == null) {
+            if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive路径404: $relPath (rootId=$rootId)")
+            return false
+        }
+
         val first = downloadDriveToFile(context, fileId, target, token, rangeHeader)
         if (first.success) return true
         if (first.httpCode == 404) {
             pathToFileIdCache.remove(relPath.trim().replace('\\', '/').trimStart('/'))
-            val refreshedId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true) ?: return false
-            return downloadDriveToFile(context, refreshedId, target, token, rangeHeader).success
+            val refreshedId = resolveDriveFileIdByPath(context, relPath, token, bypassCache = true)
+            if (refreshedId == null) {
+                if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive路径404重试未找到: $relPath")
+                return false
+            }
+            val second = downloadDriveToFile(context, refreshedId, target, token, rangeHeader)
+            if (!second.success && itemId.isNotEmpty()) {
+                setLastOriginalError(itemId, "Drive下载HTTP ${second.httpCode} (fileId=$refreshedId)")
+            }
+            return second.success
+        } else {
+            if (itemId.isNotEmpty()) setLastOriginalError(itemId, "Drive下载HTTP ${first.httpCode} (fileId=$fileId)")
         }
         return false
     }
@@ -794,10 +844,24 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
 
     suspend fun fetchOriginal(context: Context, uri: Uri): File? = withContext(Dispatchers.IO) {
         val itemId = (uri.host ?: uri.authority)?.trim()?.lowercase().orEmpty()
-        val relPath = uri.getQueryParameter("rel")?.trim().orEmpty()
-        if (itemId.isEmpty() || relPath.isEmpty()) return@withContext null
+        var relPath = uri.getQueryParameter("rel")?.trim().orEmpty()
+        if (itemId.isEmpty() || relPath.isEmpty()) {
+            setLastOriginalError(itemId, "无效云端URI参数 (itemId=$itemId, rel=$relPath)")
+            return@withContext null
+        }
+
+        while (relPath.contains("%2F", ignoreCase = true) || relPath.contains("%2f") || relPath.contains("%20")) {
+            val decoded = try {
+                java.net.URLDecoder.decode(relPath, "UTF-8")
+            } catch (_: Exception) {
+                break
+            }
+            if (decoded == relPath) break
+            relPath = decoded
+        }
 
         getLocalOriginalIfPresent(context, itemId)?.let {
+            lastOriginalErrors.remove(itemId)
             Log.i("CloudDebug", "[Orig] cache hit itemId=$itemId size=${it.length()} rel=$relPath")
             return@withContext it
         }
@@ -813,29 +877,46 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         try {
             val target = File(getOriginalRootDir(context), itemId)
             var ok = false
+            var lanFailedReason: String? = null
             if (lanAvailable) {
                 val lanUrl = "${getLanBaseUrl(context)}/api/original?path=${urlEncode(relPath)}"
                 ok = downloadLanToFile(context, lanUrl, target, null)
                 Log.i("CloudDebug", "[Orig] LAN download finished ok=$ok targetLen=${if (target.exists()) target.length() else -1}")
+                if (!ok) {
+                    lanFailedReason = "LAN下载失败 ($lanUrl)"
+                }
+            } else {
+                lanFailedReason = "LAN不可达(${getLanBaseUrl(context)})"
             }
+
             if (!ok) {
                 val token = getValidAccessToken(context)
-                if (token != null) {
-                    ok = downloadDrivePathWithRetry(context, relPath, target, token, null)
+                if (token == null) {
+                    val msg = "$lanFailedReason, 且Google Drive未授权登录"
+                    setLastOriginalError(itemId, msg)
+                } else {
+                    ok = downloadDrivePathWithRetry(context, relPath, target, token, null, itemId)
                     Log.i("CloudDebug", "[Orig] Drive download finished ok=$ok targetLen=${if (target.exists()) target.length() else -1}")
                 }
             }
+
             if (ok && target.isFile && target.length() > 0L) {
                 result = target
+                lastOriginalErrors.remove(itemId)
                 Log.i("CloudDebug", "[Orig] success rel=$relPath bytes=${target.length()}")
                 notifyOriginalReady(itemId)
                 evictOriginalCacheIfNeeded(context)
             } else {
+                if (!lastOriginalErrors.containsKey(itemId)) {
+                    setLastOriginalError(itemId, "原图未成功拉取 (ok=$ok, targetExists=${target.exists()})")
+                }
                 Log.w("CloudDebug", "[Orig] failed to retrieve rel=$relPath targetExists=${target.exists()}")
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            val msg = "下载原图IO异常: ${e.javaClass.simpleName}: ${e.message}"
+            setLastOriginalError(itemId, msg)
             Log.e("CloudDebug", "[Orig] exception ($relPath): ${e.message}", e)
         } finally {
             future.complete(result)
@@ -1262,7 +1343,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         rangeHeader: String?,
     ): DriveDownloadOutcome {
         var token = initialToken
-        val url = "$DRIVE_API_BASE/files/$fileId?alt=media"
+        val url = "$DRIVE_API_BASE/files/$fileId?alt=media&supportsAllDrives=true"
         for (attempt in 0..1) {
             val conn = try {
                 (URL(url).openConnection() as HttpURLConnection).apply {
@@ -1272,11 +1353,13 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
                     setRequestProperty("Authorization", "Bearer $token")
                     if (!rangeHeader.isNullOrBlank()) setRequestProperty("Range", rangeHeader)
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w("CloudDebug", "[DriveDownload] connection failed for fileId=$fileId: ${e.message}")
                 return DriveDownloadOutcome(false, -1)
             }
             try {
                 val code = conn.responseCode
+                Log.i("CloudDebug", "[DriveDownload] fileId=$fileId attempt=$attempt httpCode=$code")
                 if (code == 401 && attempt == 0) {
                     token = getValidAccessTokenBlocking(context, forceRefresh = true)
                         ?: return DriveDownloadOutcome(false, 401)
@@ -1284,8 +1367,10 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
                 }
                 if (code !in 200..299) return DriveDownloadOutcome(false, code)
                 val ok = conn.inputStream.use { writeStreamAtomically(it, target) }
+                Log.i("CloudDebug", "[DriveDownload] fileId=$fileId writeOk=$ok targetLen=${if (target.exists()) target.length() else -1}")
                 return DriveDownloadOutcome(ok, code)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w("CloudDebug", "[DriveDownload] read stream exception for fileId=$fileId: ${e.message}")
                 return DriveDownloadOutcome(false, -1)
             } finally {
                 conn.disconnect()
@@ -1330,9 +1415,14 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
                     current = getValidAccessTokenBlocking(context, forceRefresh = true) ?: return null
                     continue
                 }
-                if (code !in 200..299) return null
+                if (code !in 200..299) {
+                    val errBody = try { conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() } } catch (_: Exception) { null }
+                    Log.w("CloudDebug", "[DriveApi] HTTP $code for url=$url body=$errBody")
+                    return null
+                }
                 return JSONObject(conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() })
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w("CloudDebug", "[DriveApi] connection error for url=$url: ${e.message}")
                 return null
             } finally {
                 conn.disconnect()

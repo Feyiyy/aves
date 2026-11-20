@@ -71,9 +71,11 @@ class const FullImage({
       // get original media bytes from platform, and rely on a codec instantiated by `ImageProvider`
       return await mediaFetchService.getFullImage(decoded: false, request: request, decode: decode);
     } catch (error) {
-      // loading may fail if the provided MIME type is incorrect (e.g. the Media Store may report a JPEG as a TIFF)
       debugPrint('$runtimeType _loadAsync failed with mimeType=$mimeType, uri=$uri, error=$error');
-      throw UnreportedStateError('$mimeType decoding failed (page $pageId)');
+      if (error is PlatformException) {
+        throw error.message ?? error.toString();
+      }
+      rethrow;
     } finally {
       unawaited(chunkEvents.close());
     }

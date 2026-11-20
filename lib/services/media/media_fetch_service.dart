@@ -153,8 +153,8 @@ class PlatformMediaFetchService implements MediaFetchService {
       if (MimeTypes.isVisual(mimeType) && !_knownMediaTypes.contains(mimeType)) {
         await reportService.recordError(e, stack);
       }
+      rethrow;
     }
-    return Uint8List(0);
   }
 
   Future<ui.Codec> _bytesToCodec(Map<String, dynamic> args, Uint8List bytes, ImageDecoderCallback? decode) async {

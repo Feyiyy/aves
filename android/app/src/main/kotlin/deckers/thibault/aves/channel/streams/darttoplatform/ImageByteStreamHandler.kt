@@ -111,6 +111,7 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
     private fun streamOriginalBytesWithTrailer(contentAddress: ContentAddress) {
         val uri = contentAddress.uri
         val isCloud = uri.scheme == "cloudgallery"
+        val itemId = (uri.host ?: uri.authority)?.trim()?.lowercase().orEmpty()
         if (isCloud) {
             Log.i("CloudDebug", "[StreamOriginal] start uri=$uri mime=${contentAddress.mimeType}")
         }
@@ -131,14 +132,22 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
                     Log.e("CloudDebug", "[StreamOriginal] streamBytes returned false for $uri")
                 }
             } else if (isCloud) {
-                Log.e("CloudDebug", "[StreamOriginal] StorageUtils.openInputStream returned null for $uri")
+                val lastErr = CloudDriveApiClient.getLastOriginalError(itemId) ?: "原图下载失败 (流为null)"
+                Log.e("CloudDebug", "[StreamOriginal] StorageUtils.openInputStream returned null for $uri: $lastErr")
+                error("getImage-cloud", lastErr, null)
+                return
             }
             error("streamImage-image-read-failed", "failed to open stream for $contentAddress", null)
         } catch (e: Exception) {
+            val detail = if (isCloud) {
+                val lastErr = CloudDriveApiClient.getLastOriginalError(itemId)
+                if (!lastErr.isNullOrBlank()) "$lastErr (${e.javaClass.simpleName}: ${e.message})"
+                else "${e.javaClass.simpleName}: ${e.message}"
+            } else e.stackTraceToString()
             if (isCloud) {
-                Log.e("CloudDebug", "[StreamOriginal] exception for $contentAddress: ${e.message}", e)
+                Log.e("CloudDebug", "[StreamOriginal] exception for $contentAddress: $detail", e)
             }
-            error("streamImage-image-read-exception", "failed to get image for $contentAddress", e.stackTraceToString())
+            error(if (isCloud) "getImage-cloud" else "streamImage-image-read-exception", detail, null)
         }
     }
 
@@ -185,10 +194,16 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
                 error("streamImage-image-decode-null", "failed to get image for $contentAddress", null)
             }
         } catch (e: Exception) {
+            val detail = if (isCloud) {
+                val itemId = (uri.host ?: uri.authority)?.trim()?.lowercase().orEmpty()
+                val lastErr = CloudDriveApiClient.getLastOriginalError(itemId)
+                if (!lastErr.isNullOrBlank()) "$lastErr (${e.javaClass.simpleName}: ${e.message})"
+                else "${e.javaClass.simpleName}: ${e.message}"
+            } else e.stackTraceToString()
             if (isCloud) {
-                Log.e("CloudDebug", "[GlideFullImage] exception for $uri: ${e.message}", e)
+                Log.e("CloudDebug", "[GlideFullImage] exception for $uri: $detail", e)
             }
-            error("streamImage-image-decode-exception", "failed to get image for $contentAddress", e.stackTraceToString())
+            error(if (isCloud) "getImage-cloud" else "streamImage-image-decode-exception", detail, null)
         } finally {
             Glide.with(context).clear(target)
         }
@@ -281,10 +296,16 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
                 )
             }
         } catch (e: Exception) {
+            val detail = if (isCloud) {
+                val itemId = (contentAddress.uri.host ?: contentAddress.uri.authority)?.trim()?.lowercase().orEmpty()
+                val lastErr = CloudDriveApiClient.getLastOriginalError(itemId)
+                if (!lastErr.isNullOrBlank()) "$lastErr (${e.javaClass.simpleName}: ${e.message})"
+                else "${e.javaClass.simpleName}: ${e.message}"
+            } else e.stackTraceToString()
             if (isCloud) {
-                Log.e("CloudDebug", "[StreamRegion] exception: ${e.message}", e)
+                Log.e("CloudDebug", "[StreamRegion] exception: $detail", e)
             }
-            error("streamRegion-exception", "failed to fetch region for $contentAddress: ${e.message}", e.stackTraceToString())
+            error(if (isCloud) "getImage-cloud" else "streamRegion-exception", detail, null)
         }
     }
 

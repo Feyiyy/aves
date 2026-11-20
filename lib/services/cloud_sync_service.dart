@@ -414,9 +414,18 @@ class CloudSyncService {
       // 53-bit 稳定负数防碰撞 ID
       final entryId = _stableCloudEntryId(sha256, relPath);
 
-      // 云端条目统一规范 URI
+      var rawRelPath = relPath;
+      while (rawRelPath.contains('%2F') || rawRelPath.contains('%2f')) {
+        try {
+          rawRelPath = Uri.decodeComponent(rawRelPath);
+        } catch (_) {
+          break;
+        }
+      }
+
+      // 云端条目统一规范 URI（rel 必须为未编码的原始路径，由 Uri 类统一做单次编码）
       final queryParams = <String, String>{
-        'rel': relPath,
+        'rel': rawRelPath,
         'thumb': thumbName,
         if (hasPack) ...{
           'pack': packId,
@@ -426,7 +435,7 @@ class CloudSyncService {
       };
 
       final uri = Uri(scheme: 'cloudgallery', host: sha256, queryParameters: queryParams).toString();
-      final displayPath = '/云端相册/$relPath';
+      final displayPath = '/云端相册/$rawRelPath';
 
       // 视频保底尺寸 1920x1080，解除 Aves 播放器 isEmpty 拦截
       final isVideo = mimeType.startsWith('video/');

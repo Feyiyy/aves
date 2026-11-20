@@ -13,11 +13,13 @@ import 'package:material_ui/material_ui.dart';
 class ErrorView extends StatefulWidget {
   final AvesEntry entry;
   final VoidCallback onTap;
+  final Object? error;
 
   const new({
     super.key,
     required this.entry,
     required this.onTap,
+    this.error,
   });
 
   @override
@@ -52,7 +54,22 @@ class _ErrorViewState extends State<ErrorView> {
             return EmptyContent(
               icon: exists ? AIcons.error : AIcons.broken,
               text: exists ? context.l10n.viewerErrorUnknown : context.l10n.viewerErrorDoesNotExist,
-              alignment: .center,
+              bottom: (widget.error != null)
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 12, left: 24, right: 24),
+                      child: Text(
+                        widget.error.toString(),
+                        textAlign: TextAlign.center,
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    )
+                  : null,
+              alignment: Alignment.center,
               safeBottom: false,
             );
           },
