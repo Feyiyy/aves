@@ -7,6 +7,7 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.request.RequestOptions
 import com.bumptech.glide.signature.ObjectKey
 import deckers.thibault.aves.channel.streams.BaseStreamHandler
+import deckers.thibault.aves.cloud.CloudDriveApiClient
 import deckers.thibault.aves.decoding.RegionFetcher
 import deckers.thibault.aves.decoding.SvgRegionFetcher
 import deckers.thibault.aves.decoding.ThumbnailFetcher
