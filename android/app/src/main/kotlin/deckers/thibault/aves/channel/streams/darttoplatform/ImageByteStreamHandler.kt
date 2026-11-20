@@ -2,7 +2,10 @@ package deckers.thibault.aves.channel.streams.darttoplatform
 
 import android.content.Context
 import android.graphics.Rect
+import android.util.Log
 import com.bumptech.glide.Glide
+import com.bumptech.glide.request.RequestOptions
+import com.bumptech.glide.signature.ObjectKey
 import deckers.thibault.aves.channel.streams.BaseStreamHandler
 import deckers.thibault.aves.decoding.RegionFetcher
 import deckers.thibault.aves.decoding.SvgRegionFetcher
@@ -73,6 +76,11 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
         }
 
         val mimeType = contentAddress.mimeType
+        val isCloud = contentAddress.uri.scheme == "cloudgallery"
+        if (isCloud) {
+            Log.i("CloudDebug", "[ImageByteStream] streamFullImage uri=${contentAddress.uri} mime=$mimeType decoded=$decoded sizeBytes=$sizeBytes")
+        }
+
         if (!decoded && handleEncodedBytesInFlutter(mimeType)) {
             // the image can be decoded by Flutter codecs,
             // and there is no need for processing on the platform side
@@ -101,17 +109,35 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
     }
 
     private fun streamOriginalBytesWithTrailer(contentAddress: ContentAddress) {
+        val uri = contentAddress.uri
+        val isCloud = uri.scheme == "cloudgallery"
+        if (isCloud) {
+            Log.i("CloudDebug", "[StreamOriginal] start uri=$uri mime=${contentAddress.mimeType}")
+        }
         try {
-            val stream = StorageUtils.openInputStream(context, contentAddress.uri)
+            val stream = StorageUtils.openInputStream(context, uri)
             if (stream != null) {
+                if (isCloud) {
+                    Log.i("CloudDebug", "[StreamOriginal] stream opened, writing bytes to Flutter sink...")
+                }
                 val sent = stream.use(::streamBytes)
                 if (sent) {
+                    if (isCloud) {
+                        Log.i("CloudDebug", "[StreamOriginal] successfully sent bytes with trailer for $uri")
+                    }
                     success(BitmapUtils.FORMAT_BYTE_ENCODED_AS_BYTES)
                     return
+                } else if (isCloud) {
+                    Log.e("CloudDebug", "[StreamOriginal] streamBytes returned false for $uri")
                 }
+            } else if (isCloud) {
+                Log.e("CloudDebug", "[StreamOriginal] StorageUtils.openInputStream returned null for $uri")
             }
             error("streamImage-image-read-failed", "failed to open stream for $contentAddress", null)
         } catch (e: Exception) {
+            if (isCloud) {
+                Log.e("CloudDebug", "[StreamOriginal] exception for $contentAddress: ${e.message}", e)
+            }
             error("streamImage-image-read-exception", "failed to get image for $contentAddress", e.stackTraceToString())
         }
     }
@@ -126,10 +152,18 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
     ) {
         val mimeType = contentAddress.mimeType
         val pageId = contentAddress.pageId
+        val uri = contentAddress.uri
+        val isCloud = uri.scheme == "cloudgallery"
 
+        if (isCloud) {
+            Log.i("CloudDebug", "[GlideFullImage] start uri=$uri mime=$mimeType rot=$rotationDegrees")
+        }
+
+        val sigSuffix = if (isCloud) "-orig-v3" else ""
         val target = Glide.with(context)
             .asBitmap()
             .apply(AvesAppGlideModule.uncachedFullImageOptions)
+            .apply(RequestOptions().signature(ObjectKey("$uri$sigSuffix")))
             .load(AvesAppGlideModule.getModel(context, contentAddress, sizeBytes))
             .submit()
         try {
@@ -138,13 +172,22 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
                 bitmap = applyExifOrientation(context, bitmap, rotationDegrees, isFlipped)
             }
             if (bitmap != null) {
+                if (isCloud) {
+                    Log.i("CloudDebug", "[GlideFullImage] successfully decoded bitmap=${bitmap.width}x${bitmap.height} for $uri")
+                }
                 // do not recycle bitmaps fetched from Glide as their lifecycle is unknown
                 val bytes = BitmapUtils.getBytes(bitmap, recycle = false, decoded = decoded, applyGainmap = applyGainmap, mimeType = mimeType)
                 streamBytes(ByteArrayInputStream(bytes))
             } else {
+                if (isCloud) {
+                    Log.e("CloudDebug", "[GlideFullImage] decoded bitmap is null for $uri")
+                }
                 error("streamImage-image-decode-null", "failed to get image for $contentAddress", null)
             }
         } catch (e: Exception) {
+            if (isCloud) {
+                Log.e("CloudDebug", "[GlideFullImage] exception for $uri: ${e.message}", e)
+            }
             error("streamImage-image-decode-exception", "failed to get image for $contentAddress", e.stackTraceToString())
         } finally {
             Glide.with(context).clear(target)
@@ -199,38 +242,49 @@ class ImageByteStreamHandler(private val context: Context, private val arguments
             return
         }
 
+        val isCloud = contentAddress.uri.scheme == "cloudgallery"
         val regionRect = Rect(x, y, x + width, y + height)
-        when (contentAddress.mimeType) {
-            MimeTypes.SVG -> SvgRegionFetcher(context).fetch(
-                uri = contentAddress.uri,
-                decoded = decoded,
-                sizeBytes = sizeBytes,
-                scale = sampleSize,
-                regionRect = regionRect,
-                imageWidth = imageWidth,
-                imageHeight = imageHeight,
-                result = this,
-            )
+        if (isCloud) {
+            Log.i("CloudDebug", "[StreamRegion] start uri=${contentAddress.uri} sampleSize=$sampleSize rect=$regionRect imageSize=${imageWidth}x$imageHeight mime=${contentAddress.mimeType}")
+        }
+        try {
+            when (contentAddress.mimeType) {
+                MimeTypes.SVG -> SvgRegionFetcher(context).fetch(
+                    uri = contentAddress.uri,
+                    decoded = decoded,
+                    sizeBytes = sizeBytes,
+                    scale = sampleSize,
+                    regionRect = regionRect,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    result = this,
+                )
 
-            MimeTypes.TIFF -> TiffRegionFetcher(context).fetch(
-                uri = contentAddress.uri,
-                page = contentAddress.pageId ?: 0,
-                decoded = decoded,
-                sampleSize = sampleSize,
-                regionRect = regionRect,
-                result = this,
-            )
+                MimeTypes.TIFF -> TiffRegionFetcher(context).fetch(
+                    uri = contentAddress.uri,
+                    page = contentAddress.pageId ?: 0,
+                    decoded = decoded,
+                    sampleSize = sampleSize,
+                    regionRect = regionRect,
+                    result = this,
+                )
 
-            else -> regionFetcher.fetch(
-                contentAddress = contentAddress,
-                decoded = decoded,
-                applyGainmap = applyGainmap,
-                sampleSize = sampleSize,
-                regionRect = regionRect,
-                imageWidth = imageWidth,
-                imageHeight = imageHeight,
-                result = this,
-            )
+                else -> regionFetcher.fetch(
+                    contentAddress = contentAddress,
+                    decoded = decoded,
+                    applyGainmap = applyGainmap,
+                    sampleSize = sampleSize,
+                    regionRect = regionRect,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    result = this,
+                )
+            }
+        } catch (e: Exception) {
+            if (isCloud) {
+                Log.e("CloudDebug", "[StreamRegion] exception: ${e.message}", e)
+            }
+            error("streamRegion-exception", "failed to fetch region for $contentAddress: ${e.message}", e.stackTraceToString())
         }
     }
 

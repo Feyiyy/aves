@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:aves/locale/aves_locale.dart';
 import 'package:aves/model/app/support.dart';
 import 'package:aves/model/entry/entry.dart';
+import 'package:aves/model/entry/origins.dart';
 import 'package:aves/model/settings/settings.dart';
 import 'package:aves/model/source/trash.dart';
 import 'package:aves/ref/mime_types.dart';
@@ -34,7 +35,7 @@ extension ExtraAvesEntryProps on AvesEntry {
 
   // size
 
-  bool get useTiles => !isAnimated;
+  bool get useTiles => !isAnimated && origin != EntryOrigins.cloud;
 
   bool get isSized => width > 0 && height > 0;
 

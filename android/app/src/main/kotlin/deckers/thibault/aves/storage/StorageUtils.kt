@@ -586,10 +586,10 @@ object StorageUtils {
         if (uri.scheme == "cloudgallery") {
             val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
             return if (original != null && original.exists() && original.length() > 0L) {
-                Log.d(LOG_TAG, "[Glide] Hit Real Original: $uri (${original.length()} bytes)")
+                Log.i("CloudDebug", "[Glide] Hit Real Original: $uri (${original.length()} bytes) -> ${original.absolutePath}")
                 Uri.fromFile(original)
             } else {
-                Log.w("CloudDebug", "getGlideSafeUri fetchOriginal failed: $uri")
+                Log.e("CloudDebug", "[Glide] getGlideSafeUri fetchOriginal failed: $uri")
                 uri
             }
         }
@@ -638,10 +638,10 @@ object StorageUtils {
             return if (uri.scheme == "cloudgallery") {
                 val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
                 if (original != null && original.exists() && original.length() > 0L) {
-                    Log.d(LOG_TAG, "[Stream] Hit Real Original: $uri (${original.length()} bytes)")
+                    Log.i("CloudDebug", "[Stream] Hit Real Original: $uri (${original.length()} bytes) -> ${original.absolutePath}")
                     original.inputStream()
                 } else {
-                    Log.w("CloudDebug", "fetchOriginal failed: $uri")
+                    Log.e("CloudDebug", "[Stream] fetchOriginal failed: $uri")
                     null
                 }
             } else if (uri.isFileScheme) {

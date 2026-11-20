@@ -55,7 +55,12 @@ class _RasterImageViewState extends State<RasterImageView> {
   @override
   void initState() {
     super.initState();
-    _fullImageListener = ImageStreamListener(_onFullImageCompleted);
+    _fullImageListener = ImageStreamListener(
+      _onFullImageCompleted,
+      onError: (exception, stackTrace) {
+        debugPrint('RasterImageView failed to load fullImageProvider for ${entry.uri}: $exception');
+      },
+    );
     _viewportSize = widget.viewStateNotifier.value.viewportSize;
     _registerWidget(widget);
     _initFullImage();

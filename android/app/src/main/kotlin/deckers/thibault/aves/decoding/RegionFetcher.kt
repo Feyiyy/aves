@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.graphics.createBitmap
 import com.bumptech.glide.Glide
 import deckers.thibault.aves.channel.streams.darttoplatform.ByteSink
+import deckers.thibault.aves.cloud.CloudDriveApiClient
 import deckers.thibault.aves.glide.AvesAppGlideModule
 import deckers.thibault.aves.glide.MultiPageImage
 import deckers.thibault.aves.model.ContentAddress
@@ -24,12 +25,14 @@ import deckers.thibault.aves.utils.MathUtils
 import deckers.thibault.aves.utils.MemoryUtils
 import deckers.thibault.aves.utils.MimeTypes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 // As of Android 14 (API 34), `BitmapRegionDecoder` documentation states
@@ -78,8 +81,14 @@ class RegionFetcher internal constructor(
         try {
             val decoder = getOrCreateDecoder(context, uri, requestKey)
             if (decoder == null) {
+                Log.w("CloudDebug", "[Region] decoder is null for $contentAddress")
                 result.error("fetch-read-null", "failed to open file for $contentAddress regionRect=$regionRect", null)
                 return
+            }
+
+            val isCloud = uri.scheme == "cloudgallery"
+            if (isCloud) {
+                Log.i("CloudDebug", "[Region] fetch uri=$uri imageWidth=$imageWidth imageHeight=$imageHeight decoderW=${decoder.width} decoderH=${decoder.height} regionRect=$regionRect sampleSize=$sampleSize")
             }
 
             // with raw images, the known image size may not match the decoded image size
@@ -100,6 +109,20 @@ class RegionFetcher internal constructor(
                 if (factor > 1) {
                     effectiveSampleSize = max(1, effectiveSampleSize / factor)
                 }
+            }
+
+            // 安全裁剪：确保 effectiveRect 严格在 decoder 物理边界内，防止 IllegalArgumentException: rectangle is outside the image
+            effectiveRect = Rect(
+                max(0, effectiveRect.left),
+                max(0, effectiveRect.top),
+                min(decoder.width, effectiveRect.right),
+                min(decoder.height, effectiveRect.bottom)
+            )
+
+            if (effectiveRect.width() <= 0 || effectiveRect.height() <= 0) {
+                Log.w("CloudDebug", "[Region] effectiveRect is empty after clamp: $effectiveRect for decoder ${decoder.width}x${decoder.height}")
+                result.error("fetch-empty-region", "Region empty for $contentAddress regionRect=$regionRect effectiveRect=$effectiveRect", null)
+                return
             }
 
             val options = BitmapFactory.Options().apply {
@@ -138,6 +161,7 @@ class RegionFetcher internal constructor(
                 result.streamBytes(ByteArrayInputStream(bytes))
             }
         } catch (e: Exception) {
+            Log.e("CloudDebug", "[Region] fetch exception for $contentAddress regionRect=$regionRect: ${e.message}", e)
             if (EXPORT_MIME_TYPE != mimeType) {
                 // retry with export on failure,
                 // as some formats are not fully supported by `BitmapRegionDecoder`
@@ -222,9 +246,25 @@ class RegionFetcher internal constructor(
             poolLock.withLock {
                 var decoderRef = decoderPool.firstOrNull { it.requestKey == requestKey }
                 if (decoderRef == null) {
-                    val newDecoder = StorageUtils.openInputStream(context, uri)?.use { input ->
-                        Log.d(LOG_TAG, "create region decoder for requestKey=$requestKey")
-                        BitmapRegionDecoderCompat.newInstance(input)
+                    val newDecoder = if (uri.scheme == "cloudgallery") {
+                        val original = runBlocking { CloudDriveApiClient.fetchOriginal(context, uri) }
+                        if (original != null && original.exists() && original.length() > 0L) {
+                            Log.i("CloudDebug", "[Region] create region decoder from cloud original file: ${original.absolutePath} (${original.length()} bytes)")
+                            try {
+                                BitmapRegionDecoderCompat.newInstance(original.absolutePath)
+                            } catch (e: Exception) {
+                                Log.e("CloudDebug", "[Region] failed to create decoder from path: ${original.absolutePath}", e)
+                                null
+                            }
+                        } else {
+                            Log.w("CloudDebug", "[Region] fetchOriginal returned null or missing file for $uri")
+                            null
+                        }
+                    } else {
+                        StorageUtils.openInputStream(context, uri)?.use { input ->
+                            Log.d(LOG_TAG, "create region decoder for requestKey=$requestKey")
+                            BitmapRegionDecoderCompat.newInstance(input)
+                        }
                     }
                     if (newDecoder == null) {
                         return null

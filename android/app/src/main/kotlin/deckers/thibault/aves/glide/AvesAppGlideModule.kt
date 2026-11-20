@@ -96,6 +96,12 @@ class AvesAppGlideModule : AppGlideModule() {
             val mimeType = contentAddress.mimeType
             val pageId = contentAddress.pageId
 
+            if (contentAddress.uri.scheme == "cloudgallery") {
+                val safeUri = StorageUtils.getGlideSafeUri(context, contentAddress, sizeBytes = sizeBytes)
+                Log.i("CloudDebug", "[GlideModule] getModel cloudgallery uri=${contentAddress.uri} -> $safeUri")
+                return safeUri
+            }
+
             return if (pageId != null && MultiPageImage.isSupported(mimeType)) {
                 MultiPageImage(context, contentAddress)
             } else if (mimeType == MimeTypes.TIFF) {

@@ -174,10 +174,11 @@ class ThumbnailFetcher internal constructor(
     }
 
     fun getByGlide(): Bitmap? {
+        val sigSuffix = if (uri.scheme == "cloudgallery") "-orig-v3" else ""
         // add signature to ignore cache for images which got modified but kept the same URI
         var options = RequestOptions()
             .format(DecodeFormat.PREFER_ARGB_8888)
-            .signature(ObjectKey("$dateModifiedMillis-$rotationDegrees-$isFlipped-$width-$pageId"))
+            .signature(ObjectKey("$dateModifiedMillis-$rotationDegrees-$isFlipped-$width-$pageId$sigSuffix"))
             .override(width, height)
         if (isVideo(mimeType)) {
             options = options.diskCacheStrategy(DiskCacheStrategy.RESOURCE)

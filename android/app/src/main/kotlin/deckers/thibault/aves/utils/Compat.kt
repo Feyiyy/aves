@@ -81,4 +81,14 @@ object BitmapRegionDecoderCompat {
             BitmapRegionDecoder.newInstance(input, false)
         }
     }
+
+    @Throws(IOException::class)
+    fun newInstance(path: String): BitmapRegionDecoder? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            BitmapRegionDecoder.newInstance(path)
+        } else {
+            @Suppress("DEPRECATION")
+            BitmapRegionDecoder.newInstance(path, false)
+        }
+    }
 }

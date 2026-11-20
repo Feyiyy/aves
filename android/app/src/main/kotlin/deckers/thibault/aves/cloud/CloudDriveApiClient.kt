@@ -141,6 +141,24 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    fun purgeGlideDiskCacheIfNeeded(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences("cloudgallery_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("glide_cache_purged_v3", false)) {
+            ioScope.launch {
+                try {
+                    val glideCacheDir = File(context.applicationContext.cacheDir, "image_manager_disk_cache")
+                    if (glideCacheDir.exists()) {
+                        glideCacheDir.deleteRecursively()
+                        Log.i("CloudDebug", "[GlideCache] Successfully purged dirty Glide disk cache: ${glideCacheDir.absolutePath}")
+                    }
+                    prefs.edit().putBoolean("glide_cache_purged_v3", true).apply()
+                } catch (e: Exception) {
+                    Log.w("CloudDebug", "[GlideCache] Failed to purge Glide disk cache", e)
+                }
+            }
+        }
+    }
+
     fun configure(
         context: Context,
         lanBaseUrl: String? = null,
@@ -150,6 +168,7 @@ object CloudDriveApiClient : EventChannel.StreamHandler {
         driveRootFolderName: String? = null,
         driveRootFolderId: String? = null,
     ) {
+        purgeGlideDiskCacheIfNeeded(context)
         val editor = prefs(context).edit()
         lanBaseUrl?.let { editor.putString(KEY_LAN_URL, it.trim().trimEnd('/')) }
         lanApiToken?.let { editor.putString(KEY_LAN_TOKEN, it.trim()) }

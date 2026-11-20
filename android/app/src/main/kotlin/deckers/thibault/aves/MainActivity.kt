@@ -5,6 +5,7 @@ import android.app.KeyguardManager
 import android.app.SearchManager
 import android.appwidget.AppWidgetManager
 import android.content.ClipData
+import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.content.res.Configuration
@@ -18,6 +19,7 @@ import android.os.TransactionTooLargeException
 import android.os.ext.SdkExtensions
 import android.provider.MediaStore
 import android.util.Log
+import java.io.File
 import androidx.annotation.RequiresApi
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
@@ -94,6 +96,7 @@ open class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.i(LOG_TAG, "onCreate intent=$intent")
         logExtras(intent, "onCreate")
+        purgeGlideDiskCacheIfNeeded()
 
 //        StrictMode.setThreadPolicy(
 //            StrictMode.ThreadPolicy.Builder()
@@ -125,6 +128,24 @@ open class MainActivity : FlutterFragmentActivity() {
         } catch (e: Exception) {
             // accessing extras may fail if their type comes from sending app
             Log.w(LOG_TAG, "failed to parse extras", e)
+        }
+    }
+
+    private fun purgeGlideDiskCacheIfNeeded() {
+        val prefs = getSharedPreferences("cloudgallery_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("glide_cache_purged_v3", false)) {
+            Thread {
+                try {
+                    val glideCacheDir = File(cacheDir, "image_manager_disk_cache")
+                    if (glideCacheDir.exists()) {
+                        glideCacheDir.deleteRecursively()
+                        Log.i("CloudDebug", "[GlideCache] Successfully purged dirty Glide disk cache: ${glideCacheDir.absolutePath}")
+                    }
+                    prefs.edit().putBoolean("glide_cache_purged_v3", true).apply()
+                } catch (e: Exception) {
+                    Log.w("CloudDebug", "[GlideCache] Failed to purge Glide disk cache", e)
+                }
+            }.start()
         }
     }
 
